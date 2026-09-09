@@ -4,29 +4,24 @@ import type { TranslationRow } from "./types";
 
 /**
  * Build a ZIP mirroring *.lproj/*.strings structure for the target locale.
- * Paths like Payload/App.app/en.lproj/Localizable.strings
- * become     Payload/App.app/{target}.lproj/Localizable.strings
+ * Returns a Blob suitable for browser download.
  */
 export async function buildTranslationZip(
   rows: TranslationRow[],
   targetLang: string
-): Promise<Buffer> {
+): Promise<Blob> {
   const zip = new JSZip();
 
-  // Group by output file path
   const byFile = new Map<string, { key: string; value: string }[]>();
 
   for (const row of rows) {
     let outPath = row.filePath;
-    // Remap .lproj folder to target language
     outPath = outPath.replace(
       /\/[A-Za-z]{2}(?:[-_][A-Za-z0-9]+)?\.lproj\//,
       `/${targetLang}.lproj/`
     );
-    // Base.lproj → target.lproj
     outPath = outPath.replace(/\/Base\.lproj\//i, `/${targetLang}.lproj/`);
 
-    // xcstrings → write a companion .strings under target.lproj
     if (outPath.toLowerCase().endsWith(".xcstrings")) {
       const dir = outPath.replace(/\/[^/]+\.xcstrings$/i, "");
       outPath = `${dir}/${targetLang}.lproj/Localizable.strings`;
@@ -40,15 +35,9 @@ export async function buildTranslationZip(
   }
 
   for (const [path, entries] of byFile) {
-    if (path.toLowerCase().endsWith(".strings")) {
-      zip.file(path, serializeStringsFile(entries));
-    } else {
-      // Fallback: write as strings anyway
-      zip.file(path, serializeStringsFile(entries));
-    }
+    zip.file(path, serializeStringsFile(entries));
   }
 
-  // Add a small README inside the zip
   zip.file(
     "README.txt",
     [
@@ -62,9 +51,8 @@ export async function buildTranslationZip(
     ].join("\n")
   );
 
-  const buf = await zip.generateAsync({
-    type: "nodebuffer",
+  return zip.generateAsync({
+    type: "blob",
     compression: "DEFLATE",
   });
-  return Buffer.from(buf);
 }

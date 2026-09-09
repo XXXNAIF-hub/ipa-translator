@@ -1,38 +1,39 @@
 /**
  * Parse Apple .strings (UTF-8 / UTF-16 LE/BE) and .xcstrings catalogs.
+ * Browser-safe: uses Uint8Array + TextDecoder (no Node Buffer).
  */
 
 import { shouldSkipTranslation } from "./skip-heuristics";
 import type { LocalizedString } from "./types";
 
-export function decodeBuffer(buf: Buffer): string {
+export function decodeBytes(buf: Uint8Array): string {
   if (buf.length >= 2) {
     // UTF-16 LE BOM
     if (buf[0] === 0xff && buf[1] === 0xfe) {
-      return buf.toString("utf16le");
+      return new TextDecoder("utf-16le").decode(buf);
     }
     // UTF-16 BE BOM
     if (buf[0] === 0xfe && buf[1] === 0xff) {
-      const swapped = Buffer.alloc(buf.length - 2);
+      const swapped = new Uint8Array(buf.length - 2);
       for (let i = 2; i + 1 < buf.length; i += 2) {
         swapped[i - 2] = buf[i + 1];
         swapped[i - 1] = buf[i];
       }
-      return swapped.toString("utf16le");
+      return new TextDecoder("utf-16le").decode(swapped);
     }
     // UTF-8 BOM
-    if (buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) {
-      return buf.toString("utf8");
+    if (buf[0] === 0xef && buf[1] === 0xbb && buf.length >= 3 && buf[2] === 0xbf) {
+      return new TextDecoder("utf-8").decode(buf.subarray(3));
     }
     // Heuristic: many nulls → likely UTF-16 LE without BOM
     const sample = buf.subarray(0, Math.min(64, buf.length));
     let nulls = 0;
     for (let i = 0; i < sample.length; i++) if (sample[i] === 0) nulls++;
     if (nulls > sample.length / 4) {
-      return buf.toString("utf16le");
+      return new TextDecoder("utf-16le").decode(buf);
     }
   }
-  return buf.toString("utf8");
+  return new TextDecoder("utf-8").decode(buf);
 }
 
 /** Unescape common .strings escape sequences */

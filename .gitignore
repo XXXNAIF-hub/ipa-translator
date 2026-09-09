@@ -11,12 +11,11 @@
 # testing
 /coverage
 
-# next.js
-/.next/
-/out/
-
-# production
+# build
+/dist
+/out
 /build
+/.next/
 
 # misc
 .DS_Store
@@ -45,7 +44,6 @@ next-env.d.ts
 AGENTS.md
 CLAUDE.md
 
-# Transformers.js / Opus-MT model cache (downloaded on first translate)
+# Transformers.js model cache (local/dev only; browser uses Cache API)
 .cache/
 models/
-

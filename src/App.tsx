@@ -1,24 +1,25 @@
-"use client";
-
 import { useCallback, useMemo, useRef, useState } from "react";
+import { parseIpaArrayBuffer } from "@/lib/ipa-parser";
+import { buildTranslationZip } from "@/lib/export-zip";
+import { translateStrings, LOCAL_ENGINE } from "@/lib/translate";
 import type { LocalizedString, TranslationRow } from "@/lib/types";
 
 const MAX_MB = 200;
-const BATCH_SIZE = 8;
 
 const LANGS = [
   { code: "ar", label: "العربية (ar)" },
-  { code: "en", label: "English (en)" },
   { code: "fr", label: "Français (fr)" },
   { code: "es", label: "Español (es)" },
   { code: "de", label: "Deutsch (de)" },
   { code: "tr", label: "Türkçe (tr)" },
   { code: "hi", label: "Hindi (hi)" },
-  { code: "ur", label: "اردو (ur)" },
   { code: "zh-CN", label: "中文 (zh-CN)" },
-  { code: "ja", label: "日本語 (ja)" },
   { code: "it", label: "Italiano (it)" },
   { code: "ru", label: "Русский (ru)" },
+  { code: "nl", label: "Nederlands (nl)" },
+  { code: "pl", label: "Polski (pl)" },
+  { code: "he", label: "עברית (he)" },
+  { code: "en", label: "English (en) — من العربية" },
 ];
 
 type ParseSummary = {
@@ -28,10 +29,11 @@ type ParseSummary = {
   files: string[];
 };
 
-export default function HomePage() {
+export default function App() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState<"idle" | "parse" | "translate" | "export">(
     "idle"
   );
@@ -45,6 +47,7 @@ export default function HomePage() {
 
   const reset = () => {
     setError(null);
+    setStatus(null);
     setSummary(null);
     setStrings([]);
     setRows([]);
@@ -54,11 +57,15 @@ export default function HomePage() {
 
   const handleFile = useCallback(async (file: File) => {
     setError(null);
+    setStatus(null);
     setRows([]);
     setSummary(null);
     setStrings([]);
 
-    if (!file.name.toLowerCase().endsWith(".ipa") && !file.name.toLowerCase().endsWith(".zip")) {
+    if (
+      !file.name.toLowerCase().endsWith(".ipa") &&
+      !file.name.toLowerCase().endsWith(".zip")
+    ) {
       setError("يرجى رفع ملف بامتداد .ipa فقط.");
       return;
     }
@@ -71,15 +78,10 @@ export default function HomePage() {
 
     setFileName(file.name);
     setBusy("parse");
+    setStatus("جاري قراءة الـ IPA في المتصفح...");
     try {
-      const fd = new FormData();
-      fd.append("file", file);
-      const res = await fetch("/api/parse", { method: "POST", body: fd });
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.error || "فشل تحليل الملف.");
-        return;
-      }
+      const buffer = await file.arrayBuffer();
+      const data = await parseIpaArrayBuffer(buffer);
       setSummary({
         appName: data.appName,
         locales: data.locales || [],
@@ -87,8 +89,11 @@ export default function HomePage() {
         files: data.files || [],
       });
       setStrings(data.strings || []);
-    } catch {
-      setError("تعذر الاتصال بالخادم أثناء الرفع.");
+      setStatus(null);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "فشل تحليل الملف في المتصفح."
+      );
     } finally {
       setBusy("idle");
     }
@@ -111,30 +116,30 @@ export default function HomePage() {
     setRows([]);
     setProgress({ done: 0, total: strings.length });
 
-    const allRows: TranslationRow[] = [];
+    const byId = new Map<string, TranslationRow>();
     try {
-      for (let i = 0; i < strings.length; i += BATCH_SIZE) {
-        const batch = strings.slice(i, i + BATCH_SIZE);
-        const res = await fetch("/api/translate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            strings: batch,
-            targetLang,
-            sourceLang: "en",
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          setError(data.error || "فشلت الترجمة.");
-          break;
-        }
-        allRows.push(...(data.rows as TranslationRow[]));
-        setRows([...allRows]);
-        setProgress({ done: allRows.length, total: strings.length });
-      }
-    } catch {
-      setError("تعذر الاتصال أثناء الترجمة المحلية. تأكد أن الخادم يعمل وأن الموديل جاهز.");
+      const sourceLang = targetLang === "en" ? "ar" : "en";
+      const result = await translateStrings({
+        strings,
+        targetLang,
+        sourceLang,
+        onStatus: (msg) => setStatus(msg),
+        onProgress: (done, total, row) => {
+          byId.set(row.id, row);
+          setRows(strings.map((s) => byId.get(s.id)).filter(Boolean) as TranslationRow[]);
+          setProgress({ done, total });
+        },
+      });
+      const finalMap = new Map(result.map((r) => [r.id, r]));
+      setRows(strings.map((s) => finalMap.get(s.id)!).filter(Boolean));
+      setProgress({ done: strings.length, total: strings.length });
+      setStatus(null);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "فشلت الترجمة في المتصفح. جرّب جهازاً بذاكرة أكبر أو أعد المحاولة."
+      );
     } finally {
       setBusy("idle");
     }
@@ -145,29 +150,17 @@ export default function HomePage() {
     setBusy("export");
     setError(null);
     try {
-      const res = await fetch("/api/export", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          rows,
-          targetLang,
-          appName: summary?.appName,
-        }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(data.error || "فشل التصدير.");
-        return;
-      }
-      const blob = await res.blob();
+      const blob = await buildTranslationZip(rows, targetLang);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
       a.download = `${summary?.appName || "localization"}-${targetLang}-strings.zip`;
       a.click();
       URL.revokeObjectURL(url);
-    } catch {
-      setError("تعذر تنزيل ملف ZIP.");
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "تعذر تنزيل ملف ZIP."
+      );
     } finally {
       setBusy("idle");
     }
@@ -199,17 +192,20 @@ export default function HomePage() {
     <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 px-4 py-8 sm:px-6">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <p className="mb-1 text-sm text-muted">أداة مجانية للمطورين</p>
+          <p className="mb-1 text-sm text-muted">أداة مجانية تعمل بالكامل في المتصفح</p>
           <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">
             مترجم نصوص IPA
           </h1>
           <p className="mt-2 max-w-2xl text-muted">
             ارفع ملف <span className="text-foreground">.ipa</span> لاستخراج
             النصوص المحلية وترجمتها (العربية افتراضياً) ثم تنزيل ZIP لملفات
-            الترجمة — دون إعادة توقيع أو تثبيت.
+            الترجمة — دون رفع إلى خادم، ودون إعادة توقيع أو تثبيت.
           </p>
           <p className="mt-2 max-w-2xl text-sm text-accent-2">
-            ترجمة محلية بدون حد يومي — أول تشغيل يحمّل الموديل (~870 ميجابايت، مرة واحدة لكل الموديل متعدد اللغات).
+            ترجمة محلية في المتصفح بدون حد يومي ولا مفاتيح API — أول ترجمة تحمّل
+            موديل Opus-MT (~{LOCAL_ENGINE.approxDownloadMB} ميجابايت تقريباً،
+            يُخزَّن في كاش المتصفح). أخف من NLLB (~870MB) لتجنّب نفاد ذاكرة
+            الهواتف.
           </p>
         </div>
         <div className="text-sm text-muted">IPA Translator</div>
@@ -238,7 +234,7 @@ export default function HomePage() {
             اسحب ملف IPA هنا أو انقر للاختيار
           </div>
           <div className="text-sm text-muted">
-            الحد الأقصى {MAX_MB} ميجابايت · صيغة ZIP داخلية
+            الحد الأقصى {MAX_MB} ميجابايت · يُعالَج محلياً في جهازك
           </div>
           {fileName && (
             <div className="mt-1 rounded-full bg-[#151d33] px-3 py-1 text-sm">
@@ -257,9 +253,9 @@ export default function HomePage() {
           />
         </div>
 
-        {busy === "parse" && (
+        {(busy === "parse" || status) && (
           <p className="mt-4 text-center text-sm text-accent-2">
-            جاري استخراج النصوص...
+            {status || "جاري استخراج النصوص..."}
           </p>
         )}
         {error && (
@@ -405,9 +401,11 @@ export default function HomePage() {
           <code className="text-foreground">*.lproj/*.strings</code> فقط.
         </p>
         <p>
-          المحرّك الافتراضي: ترجمة عصبية محلية (NLLB-200 عبر Transformers.js) —
-          بدون مفاتيح أو حصص سحابية. أول ترجمة تحمّل الموديل مرة واحدة إلى{" "}
-          <code className="text-foreground">.cache/</code> (~870 ميجابايت).
+          المحرّك الافتراضي: Opus-MT عبر Transformers.js في{" "}
+          <strong className="text-foreground">متصفحك</strong> (
+          <code className="text-foreground">{LOCAL_ENGINE.defaultModel}</code>
+          ) — بدون خادم أو مفاتيح. الملف والمعالجة لا يُرفعان إلى أي سيرفر.
+          NLLB (~870MB) غير مستخدم هنا لتجنّب نفاد ذاكرة الهواتف.
         </p>
       </footer>
     </main>

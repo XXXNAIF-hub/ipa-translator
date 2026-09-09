@@ -10,6 +10,8 @@
   --muted: #94a3b8;
   --danger: #f87171;
   --success: #34d399;
+  --font-sans: "Segoe UI", Tahoma, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 @theme inline {
@@ -22,8 +24,14 @@
   --color-muted: var(--muted);
   --color-danger: var(--danger);
   --color-success: var(--success);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
 }
 
 body {
@@ -31,8 +39,8 @@ body {
     radial-gradient(900px 500px at -10% 20%, #0c2a3a 0%, transparent 50%),
     var(--background);
   color: var(--foreground);
-  font-family: var(--font-sans), "Segoe UI", Tahoma, Arial, sans-serif;
-  min-height: 100vh;
+  font-family: var(--font-sans);
+  margin: 0;
 }
 
 * {

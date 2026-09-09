@@ -1,6 +1,6 @@
-import AdmZip from "adm-zip";
+import JSZip from "jszip";
 import {
-  decodeBuffer,
+  decodeBytes,
   localeFromPath,
   parseStringsFile,
   parseXcstringsFile,
@@ -21,7 +21,6 @@ export function assertIpaSize(size: number) {
 }
 
 function guessAppName(entries: string[]): string | null {
-  // Payload/Something.app/
   for (const p of entries) {
     const m = p.match(/^Payload\/([^/]+)\.app\//);
     if (m) return m[1];
@@ -36,36 +35,41 @@ function isLocalizationFile(path: string): boolean {
   return false;
 }
 
-export function parseIpaBuffer(buffer: Buffer): ParseResult {
-  assertIpaSize(buffer.length);
+/** Parse an IPA (ZIP) entirely in-memory in the browser via JSZip. */
+export async function parseIpaArrayBuffer(
+  buffer: ArrayBuffer
+): Promise<ParseResult> {
+  assertIpaSize(buffer.byteLength);
 
-  let zip: AdmZip;
+  let zip: JSZip;
   try {
-    zip = new AdmZip(buffer);
+    zip = await JSZip.loadAsync(buffer);
   } catch {
     throw new Error(
       "تعذر فتح ملف IPA. تأكد أنه ملف IPA صالح (صيغة ZIP)."
     );
   }
 
-  const zipEntries = zip.getEntries();
-  const allPaths = zipEntries.map((e) => e.entryName);
+  const allPaths: string[] = [];
+  zip.forEach((relativePath) => {
+    allPaths.push(relativePath);
+  });
   const appName = guessAppName(allPaths);
 
   const strings: LocalizedString[] = [];
   const files: string[] = [];
   const localeSet = new Set<string>();
 
-  for (const entry of zipEntries) {
-    if (entry.isDirectory) continue;
-    const path = entry.entryName;
-    // Skip weird/mac resource forks
+  const entries = Object.values(zip.files);
+  for (const entry of entries) {
+    if (entry.dir) continue;
+    const path = entry.name;
     if (path.includes("__MACOSX") || path.includes(".DS_Store")) continue;
     if (!isLocalizationFile(path)) continue;
 
-    let data: Buffer;
+    let data: Uint8Array;
     try {
-      data = entry.getData();
+      data = await entry.async("uint8array");
     } catch {
       continue;
     }
@@ -77,14 +81,14 @@ export function parseIpaBuffer(buffer: Buffer): ParseResult {
     }
 
     if (path.toLowerCase().endsWith(".xcstrings")) {
-      const text = data.toString("utf8");
+      const text = new TextDecoder("utf-8").decode(data);
       const parsed = parseXcstringsFile(text, path);
       for (const s of parsed) {
         strings.push(s);
         if (s.locale) localeSet.add(s.locale);
       }
     } else {
-      const text = decodeBuffer(data);
+      const text = decodeBytes(data);
       const parsed = parseStringsFile(text, path, locale);
       strings.push(...parsed);
     }

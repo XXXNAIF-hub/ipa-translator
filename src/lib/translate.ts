@@ -1,133 +1,95 @@
-import path from "path";
 import { protectPlaceholders } from "./placeholders";
 import type { LocalizedString, TranslationRow } from "./types";
 
 /**
- * Offline neural MT via Transformers.js + NLLB-200 distilled (multilingual).
- * One model covers many targets; cached under <project>/.cache — no API keys,
- * no daily quota. Optional secondary: LibreTranslate via TRANSLATE_API_URL.
+ * Browser-side neural MT via Transformers.js + Opus-MT (Helsinki-NLP).
+ *
+ * NLLB-200 distilled (~870MB) is too heavy for typical phone browsers (OOM risk),
+ * so we use per-pair Opus-MT models (~80–300MB quantized) cached in the browser.
+ * Default Arabic path: Xenova/opus-mt-en-ar.
  */
 
-const NLLB_MODEL = "Xenova/nllb-200-distilled-600M";
-
-/** App / ISO-ish codes → NLLB FLORES codes */
-const NLLB_LANG: Record<string, string> = {
-  en: "eng_Latn",
-  ar: "arb_Arab",
-  fr: "fra_Latn",
-  es: "spa_Latn",
-  de: "deu_Latn",
-  tr: "tur_Latn",
-  hi: "hin_Deva",
-  ur: "urd_Arab",
-  "zh-cn": "zho_Hans",
-  zh: "zho_Hans",
-  ja: "jpn_Jpan",
-  it: "ita_Latn",
-  ru: "rus_Cyrl",
-  nl: "nld_Latn",
-  pt: "por_Latn",
-  pl: "pol_Latn",
-  ko: "kor_Hang",
-  id: "ind_Latn",
-  vi: "vie_Latn",
-  sv: "swe_Latn",
-  uk: "ukr_Cyrl",
-  cs: "ces_Latn",
-  ro: "ron_Latn",
-  hu: "hun_Latn",
-  fi: "fin_Latn",
-  da: "dan_Latn",
-  he: "heb_Hebr",
-  fa: "pes_Arab",
+/** source|target → HuggingFace Xenova model id (known-good browser models) */
+const OPUS_MODELS: Record<string, string> = {
+  "en|ar": "Xenova/opus-mt-en-ar",
+  "en|fr": "Xenova/opus-mt-en-fr",
+  "en|es": "Xenova/opus-mt-en-es",
+  "en|de": "Xenova/opus-mt-en-de",
+  "en|it": "Xenova/opus-mt-en-it",
+  "en|ru": "Xenova/opus-mt-en-ru",
+  "en|tr": "Xenova/opus-mt-en-tr",
+  "en|hi": "Xenova/opus-mt-en-hi",
+  "en|zh": "Xenova/opus-mt-en-zh",
+  "en|zh-cn": "Xenova/opus-mt-en-zh",
+  "en|nl": "Xenova/opus-mt-en-nl",
+  "en|pl": "Xenova/opus-mt-en-pl",
+  "en|uk": "Xenova/opus-mt-en-uk",
+  "en|cs": "Xenova/opus-mt-en-cs",
+  "en|sv": "Xenova/opus-mt-en-sv",
+  "en|da": "Xenova/opus-mt-en-da",
+  "en|fi": "Xenova/opus-mt-en-fi",
+  "en|hu": "Xenova/opus-mt-en-hu",
+  "en|ro": "Xenova/opus-mt-en-ro",
+  "en|id": "Xenova/opus-mt-en-id",
+  "en|vi": "Xenova/opus-mt-en-vi",
+  "en|he": "Xenova/opus-mt-en-he",
+  "ar|en": "Xenova/opus-mt-ar-en",
 };
 
 export function supportedLocalTargets(): string[] {
-  return Object.keys(NLLB_LANG).filter((k) => k !== "zh" && k !== "en");
+  const targets = new Set<string>();
+  for (const key of Object.keys(OPUS_MODELS)) {
+    const [, tgt] = key.split("|");
+    if (tgt && tgt !== "en" && tgt !== "zh") targets.add(tgt);
+  }
+  return Array.from(targets).sort();
 }
 
 function normalizeLang(code: string): string {
   return code.toLowerCase().replace("_", "-");
 }
 
-function nllbCode(lang: string): string | null {
-  return NLLB_LANG[normalizeLang(lang)] ?? null;
+function modelForPair(source: string, target: string): string | null {
+  const s = normalizeLang(source);
+  const t = normalizeLang(target);
+  return OPUS_MODELS[`${s}|${t}`] ?? null;
 }
 
 function unsupportedMessage(source: string, target: string): string {
   const supported = supportedLocalTargets().join(", ");
   return (
-    `لا يتوفر موديل ترجمة محلي للزوج ${source}→${target}. ` +
-    `اللغات المدعومة محلياً: ${supported}. ` +
-    `يمكنك تعيين TRANSLATE_API_URL لمثيل LibreTranslate خاص كخيار ثانوي.`
+    `لا يتوفر موديل ترجمة في المتصفح للزوج ${source}→${target}. ` +
+    `اللغات المدعومة من الإنجليزية: ${supported}.`
   );
 }
 
 type TranslatorFn = (
   texts: string | string[],
-  opts?: {
-    src_lang?: string;
-    tgt_lang?: string;
-    max_new_tokens?: number;
-  }
+  opts?: { max_new_tokens?: number }
 ) => Promise<{ translation_text: string } | { translation_text: string }[]>;
 
-let pipelinePromise: Promise<TranslatorFn> | null = null;
+const pipelineCache = new Map<string, Promise<TranslatorFn>>();
 let envConfigured = false;
 
-function cacheDir(): string {
-  return process.env.TRANSFORMERS_CACHE || path.join(process.cwd(), ".cache");
-}
-
-async function getLocalTranslator(): Promise<TranslatorFn> {
+async function getTranslator(modelId: string): Promise<TranslatorFn> {
   if (!envConfigured) {
     const { env } = await import("@xenova/transformers");
-    env.cacheDir = cacheDir();
-    env.allowLocalModels = true;
+    env.allowLocalModels = false;
     env.allowRemoteModels = true;
+    env.useBrowserCache = true;
     envConfigured = true;
   }
 
-  if (!pipelinePromise) {
-    pipelinePromise = (async () => {
+  let p = pipelineCache.get(modelId);
+  if (!p) {
+    p = (async () => {
       const { pipeline } = await import("@xenova/transformers");
-      const translator = await pipeline("translation", NLLB_MODEL);
+      const translator = await pipeline("translation", modelId);
       return translator as unknown as TranslatorFn;
     })();
+    pipelineCache.set(modelId, p);
   }
-  return pipelinePromise;
-}
-
-async function translateLibre(
-  text: string,
-  source: string,
-  target: string
-): Promise<string | null> {
-  const base = process.env.TRANSLATE_API_URL?.replace(/\/$/, "");
-  if (!base) return null;
-  const apiKey = process.env.TRANSLATE_API_KEY;
-  try {
-    const res = await fetch(`${base}/translate`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({
-        q: text,
-        source: source === "auto" ? "auto" : source,
-        target,
-        format: "text",
-        ...(apiKey ? { api_key: apiKey } : {}),
-      }),
-      signal: AbortSignal.timeout(25000),
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { translatedText?: string };
-    return data.translatedText ?? null;
-  } catch {
-    return null;
-  }
+  return p;
 }
 
 function extractTexts(
@@ -141,17 +103,18 @@ function extractTexts(
 
 async function translateTextsLocal(
   texts: string[],
-  srcLang: string,
-  tgtLang: string
+  modelId: string,
+  onModelProgress?: (msg: string) => void
 ): Promise<string[]> {
-  const translator = await getLocalTranslator();
-  const BATCH = 4; // NLLB is heavier — keep batches small
+  onModelProgress?.(
+    "جاري تحميل/تهيئة موديل الترجمة في المتصفح (أول مرة قد تستغرق دقائق)..."
+  );
+  const translator = await getTranslator(modelId);
+  const BATCH = 8;
   const out: string[] = [];
   for (let i = 0; i < texts.length; i += BATCH) {
     const chunk = texts.slice(i, i + BATCH);
     const result = await translator(chunk.length === 1 ? chunk[0] : chunk, {
-      src_lang: srcLang,
-      tgt_lang: tgtLang,
       max_new_tokens: 256,
     });
     out.push(...extractTexts(result));
@@ -164,7 +127,7 @@ export type TranslateOptions = {
   targetLang: string;
   sourceLang?: string;
   onProgress?: (done: number, total: number, row: TranslationRow) => void;
-  delayMs?: number;
+  onStatus?: (msg: string) => void;
 };
 
 export async function translateStrings(
@@ -194,12 +157,8 @@ export async function translateStrings(
     return rows;
   }
 
-  const srcNllb = nllbCode(source);
-  const tgtNllb = nllbCode(target);
-  const useCloudSecondary = Boolean(process.env.TRANSLATE_API_URL);
-  const canLocal = Boolean(srcNllb && tgtNllb);
-
-  if (!canLocal && !useCloudSecondary) {
+  const modelId = modelForPair(source, target);
+  if (!modelId) {
     throw new Error(unsupportedMessage(source, target));
   }
 
@@ -209,6 +168,7 @@ export async function translateStrings(
     restore: (t: string) => string;
   }[] = [];
 
+  let doneCount = 0;
   for (let i = 0; i < opts.strings.length; i++) {
     const s = opts.strings[i];
     if (s.skip) {
@@ -223,51 +183,34 @@ export async function translateStrings(
         skipReason: s.skipReason,
       };
       rows[i] = row;
-      opts.onProgress?.(i + 1, total, row);
+      doneCount++;
+      opts.onProgress?.(doneCount, total, row);
     } else {
       const { protectedText, restore } = protectPlaceholders(s.value);
       toTranslate.push({ index: i, original: protectedText, restore });
     }
   }
 
-  const SUB = 4;
+  const SUB = 8;
+
   for (let b = 0; b < toTranslate.length; b += SUB) {
     const chunk = toTranslate.slice(b, b + SUB);
     const inputs = chunk.map((c) => c.original);
-    let translated: string[];
 
-    try {
-      if (canLocal && srcNllb && tgtNllb) {
-        translated = await translateTextsLocal(inputs, srcNllb, tgtNllb);
-      } else {
-        translated = [];
-        for (const text of inputs) {
-          const t = await translateLibre(text, source, target);
-          if (!t) throw new Error(unsupportedMessage(source, target));
-          translated.push(t);
-        }
-      }
-    } catch (err) {
-      if (canLocal && useCloudSecondary) {
-        translated = [];
-        for (const text of inputs) {
-          const t = await translateLibre(text, source, target);
-          if (!t) {
-            const message =
-              err instanceof Error
-                ? err.message
-                : unsupportedMessage(source, target);
-            throw new Error(message);
-          }
-          translated.push(t);
-        }
-      } else {
-        throw err;
-      }
-    }
+    opts.onStatus?.(
+      b === 0
+        ? `تحميل الموديل ${modelId} ثم الترجمة...`
+        : `ترجمة ${b + 1}–${Math.min(b + SUB, toTranslate.length)} من ${toTranslate.length}...`
+    );
+
+    const translated = await translateTextsLocal(
+      inputs,
+      modelId,
+      opts.onStatus
+    );
 
     if (translated.length !== chunk.length) {
-      throw new Error("فشلت الترجمة المحلية: عدد النتائج لا يطابق المدخلات.");
+      throw new Error("فشلت الترجمة: عدد النتائج لا يطابق المدخلات.");
     }
 
     for (let j = 0; j < chunk.length; j++) {
@@ -276,7 +219,7 @@ export async function translateStrings(
       const text = (translated[j] || "").trim();
       if (!text) {
         throw new Error(
-          `فشلت الترجمة المحلية للنص: «${s.value.slice(0, 80)}» — نتيجة فارغة.`
+          `فشلت الترجمة للنص: «${s.value.slice(0, 80)}» — نتيجة فارغة.`
         );
       }
       const row: TranslationRow = {
@@ -289,7 +232,8 @@ export async function translateStrings(
         skipped: false,
       };
       rows[index] = row;
-      opts.onProgress?.(index + 1, total, row);
+      doneCount++;
+      opts.onProgress?.(doneCount, total, row);
     }
   }
 
@@ -299,18 +243,22 @@ export async function translateStrings(
 export async function translateBatch(
   strings: LocalizedString[],
   targetLang: string,
-  sourceLang = "en"
+  sourceLang = "en",
+  onProgress?: TranslateOptions["onProgress"],
+  onStatus?: TranslateOptions["onStatus"]
 ): Promise<TranslationRow[]> {
   return translateStrings({
     strings,
     targetLang,
     sourceLang,
-    delayMs: 0,
+    onProgress,
+    onStatus,
   });
 }
 
 export const LOCAL_ENGINE = {
-  name: "nllb",
-  model: NLLB_MODEL,
-  approxDownloadMB: 870,
+  name: "opus-mt",
+  defaultModel: "Xenova/opus-mt-en-ar",
+  approxDownloadMB: 150,
+  note: "NLLB-200 (~870MB) skipped for browser OOM risk on phones; Opus-MT per pair instead.",
 } as const;
