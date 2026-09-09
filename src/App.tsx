@@ -1,7 +1,11 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { parseIpaArrayBuffer } from "@/lib/ipa-parser";
 import { buildTranslationZip } from "@/lib/export-zip";
-import { translateStrings, LOCAL_ENGINE } from "@/lib/translate";
+import {
+  translateStrings,
+  selfTestTranslation,
+  LOCAL_ENGINE,
+} from "@/lib/translate";
 import type { LocalizedString, TranslationRow } from "@/lib/types";
 
 const MAX_MB = 200;
@@ -29,6 +33,17 @@ type ParseSummary = {
   files: string[];
 };
 
+type SelfTestState =
+  | { status: "idle" }
+  | { status: "running" }
+  | {
+      status: "ok" | "fail";
+      engine: string;
+      input: string;
+      output: string;
+      error?: string;
+    };
+
 export default function App() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -44,6 +59,26 @@ export default function App() {
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [search, setSearch] = useState("");
   const [fileName, setFileName] = useState<string | null>(null);
+  const [selfTest, setSelfTest] = useState<SelfTestState>({ status: "idle" });
+  const autoTestRan = useRef(false);
+
+  const runSelfTest = useCallback(async () => {
+    setSelfTest({ status: "running" });
+    const result = await selfTestTranslation();
+    setSelfTest({
+      status: result.ok ? "ok" : "fail",
+      engine: result.engine,
+      input: result.input,
+      output: result.output,
+      error: result.error,
+    });
+  }, []);
+
+  useEffect(() => {
+    if (autoTestRan.current) return;
+    autoTestRan.current = true;
+    void runSelfTest();
+  }, [runSelfTest]);
 
   const reset = () => {
     setError(null);
@@ -118,6 +153,7 @@ export default function App() {
 
     const byId = new Map<string, TranslationRow>();
     try {
+      // Default target ar → source en; target en → source ar
       const sourceLang = targetLang === "en" ? "ar" : "en";
       const result = await translateStrings({
         strings,
@@ -126,19 +162,31 @@ export default function App() {
         onStatus: (msg) => setStatus(msg),
         onProgress: (done, total, row) => {
           byId.set(row.id, row);
-          setRows(strings.map((s) => byId.get(s.id)).filter(Boolean) as TranslationRow[]);
+          setRows(
+            strings
+              .map((s) => byId.get(s.id))
+              .filter(Boolean) as TranslationRow[]
+          );
           setProgress({ done, total });
         },
       });
       const finalMap = new Map(result.map((r) => [r.id, r]));
       setRows(strings.map((s) => finalMap.get(s.id)!).filter(Boolean));
       setProgress({ done: strings.length, total: strings.length });
-      setStatus(null);
+      const fails = result.filter((r) => r.failed).length;
+      if (fails > 0) {
+        setError(
+          `اكتملت الترجمة مع فشل ${fails} نصاً (ظلت بالإنجليزية ومُعلَّمة كفشل — ليست نجاحاً صامتاً).`
+        );
+        setStatus(`اكتملت مع ${fails} فشل.`);
+      } else {
+        setStatus(null);
+      }
     } catch (err) {
       setError(
         err instanceof Error
           ? err.message
-          : "فشلت الترجمة في المتصفح. جرّب جهازاً بذاكرة أكبر أو أعد المحاولة."
+          : "فشلت الترجمة. تحقق من الاتصال وأعد المحاولة."
       );
     } finally {
       setBusy("idle");
@@ -179,7 +227,9 @@ export default function App() {
 
   const updateTranslation = (id: string, value: string) => {
     setRows((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, translation: value } : r))
+      prev.map((r) =>
+        r.id === id ? { ...r, translation: value, failed: false } : r
+      )
     );
   };
 
@@ -188,28 +238,62 @@ export default function App() {
       ? Math.round((progress.done / progress.total) * 100)
       : 0;
 
+  const failCount = rows.filter((r) => r.failed).length;
+
   return (
     <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 px-4 py-8 sm:px-6">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <p className="mb-1 text-sm text-muted">أداة مجانية تعمل بالكامل في المتصفح</p>
+          <p className="mb-1 text-sm text-muted">
+            أداة مجانية — التحليل محلياً، الترجمة عبر Google Translate العامة
+          </p>
           <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">
             مترجم نصوص IPA
           </h1>
           <p className="mt-2 max-w-2xl text-muted">
             ارفع ملف <span className="text-foreground">.ipa</span> لاستخراج
             النصوص المحلية وترجمتها (العربية افتراضياً) ثم تنزيل ZIP لملفات
-            الترجمة — دون رفع إلى خادم، ودون إعادة توقيع أو تثبيت.
+            الترجمة — دون إعادة توقيع أو تثبيت.
           </p>
           <p className="mt-2 max-w-2xl text-sm text-accent-2">
-            ترجمة محلية في المتصفح بدون حد يومي ولا مفاتيح API — أول ترجمة تحمّل
-            موديل Opus-MT (~{LOCAL_ENGINE.approxDownloadMB} ميجابايت تقريباً،
-            يُخزَّن في كاش المتصفح). أخف من NLLB (~870MB) لتجنّب نفاد ذاكرة
-            الهواتف.
+            الترجمة عبر واجهة Google العامة (translate-pa / gtx) — بدون مفتاح
+            مدفوع. الملف يُحلَّل في متصفحك؛ الترجمة تُطلب من Google فقط.
+            النصوص العربية أصلاً تُتخطى عند الهدف العربية.
           </p>
         </div>
         <div className="text-sm text-muted">IPA Translator</div>
       </header>
+
+      <section className="card flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
+        <div className="text-sm">
+          <span className="text-muted">اختبار الترجمة الذاتي: </span>
+          {selfTest.status === "idle" && (
+            <span className="text-muted">لم يُشغَّل بعد</span>
+          )}
+          {selfTest.status === "running" && (
+            <span className="text-accent-2">جاري اختبار «Sign In» → عربية…</span>
+          )}
+          {selfTest.status === "ok" && (
+            <span className="text-success">
+              OK — «{selfTest.input}» → «{selfTest.output}» ({selfTest.engine})
+            </span>
+          )}
+          {selfTest.status === "fail" && (
+            <span className="text-danger">
+              FAIL — {selfTest.error || "لا توجد أحرف عربية في الناتج"}
+              {selfTest.output ? ` (خرج: «${selfTest.output}»)` : ""}
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          className="btn btn-secondary text-sm"
+          onClick={() => void runSelfTest()}
+          disabled={selfTest.status === "running"}
+        >
+          {selfTest.status === "running" ? "جاري الاختبار…" : "إعادة اختبار الترجمة"}
+        </button>
+      </section>
 
       <section className="card p-5 sm:p-6">
         <div
@@ -234,7 +318,7 @@ export default function App() {
             اسحب ملف IPA هنا أو انقر للاختيار
           </div>
           <div className="text-sm text-muted">
-            الحد الأقصى {MAX_MB} ميجابايت · يُعالَج محلياً في جهازك
+            الحد الأقصى {MAX_MB} ميجابايت · التحليل محلي في جهازك
           </div>
           {fileName && (
             <div className="mt-1 rounded-full bg-[#151d33] px-3 py-1 text-sm">
@@ -325,7 +409,14 @@ export default function App() {
           {(busy === "translate" || progress.total > 0) && (
             <div>
               <div className="mb-2 flex justify-between text-sm text-muted">
-                <span>تقدم الترجمة</span>
+                <span>
+                  تقدم الترجمة
+                  {failCount > 0 && (
+                    <span className="ms-2 text-danger">
+                      ({failCount} فشل)
+                    </span>
+                  )}
+                </span>
                 <span>
                   {progress.done} / {progress.total} ({pct}%)
                 </span>
@@ -368,13 +459,20 @@ export default function App() {
                           تخطي: {r.skipReason || "—"}
                         </div>
                       )}
+                      {r.failed && (
+                        <div className="mt-1 text-[10px] text-danger">
+                          فشل: {r.failReason || "ترجمة غير صالحة"}
+                        </div>
+                      )}
                     </td>
                     <td className="text-sm whitespace-pre-wrap break-words">
                       {r.original}
                     </td>
                     <td>
                       <textarea
-                        className="w-full min-h-[2.5rem] resize-y text-sm"
+                        className={`w-full min-h-[2.5rem] resize-y text-sm ${
+                          r.failed ? "border-danger/50" : ""
+                        }`}
                         value={r.translation}
                         onChange={(e) =>
                           updateTranslation(r.id, e.target.value)
@@ -401,11 +499,11 @@ export default function App() {
           <code className="text-foreground">*.lproj/*.strings</code> فقط.
         </p>
         <p>
-          المحرّك الافتراضي: Opus-MT عبر Transformers.js في{" "}
-          <strong className="text-foreground">متصفحك</strong> (
-          <code className="text-foreground">{LOCAL_ENGINE.defaultModel}</code>
-          ) — بدون خادم أو مفاتيح. الملف والمعالجة لا يُرفعان إلى أي سيرفر.
-          NLLB (~870MB) غير مستخدم هنا لتجنّب نفاد ذاكرة الهواتف.
+          محرك الترجمة: Google Translate العامة (
+          <code className="text-foreground">{LOCAL_ENGINE.name}</code>
+          ) مع احتياطي <code className="text-foreground">client=gtx</code>.
+          تحليل الـ IPA يتم في متصفحك؛ طلبات الترجمة تذهب إلى Google فقط. لا
+          يُستخدم Opus-MT بعد أن كان يُرجع نتائج فارغة/خاطئة.
         </p>
       </footer>
     </main>

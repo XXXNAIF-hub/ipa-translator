@@ -35,3 +35,11 @@ export function shouldSkipTranslation(
     return { skip: true, reason: "format-only" };
   return { skip: false };
 }
+
+/** True when ≥50% of letters are Arabic script (U+0600–U+06FF). */
+export function isMostlyArabic(text: string): boolean {
+  const letters = text.match(/\p{L}/gu);
+  if (!letters || letters.length === 0) return false;
+  const arabic = (text.match(/[\u0600-\u06FF]/g) || []).length;
+  return arabic / letters.length >= 0.5;
+}

@@ -11,14 +11,8 @@ export default defineConfig({
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
-  optimizeDeps: {
-    exclude: ["@xenova/transformers"],
-  },
   build: {
     target: "es2022",
-    chunkSizeWarningLimit: 2000,
-  },
-  worker: {
-    format: "es",
+    chunkSizeWarningLimit: 1000,
   },
 });

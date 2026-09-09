@@ -26,6 +26,9 @@ export type TranslationRow = {
   filePath: string;
   skipped: boolean;
   skipReason?: string;
+  /** True when the engine failed or returned a non-translation (kept original). */
+  failed?: boolean;
+  failReason?: string;
 };
 
 export type TranslateRequest = {
