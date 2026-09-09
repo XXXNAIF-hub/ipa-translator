@@ -73,6 +73,16 @@ Placeholders like `%@`, `%d`, `%1$@`, `%%` are preserved. URLs, emails, and bund
 - `@xenova/transformers` + Opus-MT (default `en→ar`)
 - GitHub Actions → GitHub Pages on every push to `main`
 
+### Deploy / GitHub Pages
+- **Live:** https://xxxnaif-hub.github.io/ipa-translator/
+- Source branch for Pages: `gh-pages` (static `dist/` output).
+- Actions template: copy `docs/deploy-pages.yml` → `.github/workflows/deploy-pages.yml` (pushing workflow files needs a GitHub token with the `workflow` scope). Until then, republish with:
+
+```bash
+npm run build
+# then publish the contents of dist/ to the gh-pages branch
+```
+
 ### Scripts
 | Script | Purpose |
 |--------|---------|
