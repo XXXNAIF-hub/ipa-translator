@@ -1,6 +1,6 @@
 {
   "name": "ipa-translator",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "smoke": "node scripts/smoke-translate.mjs",
-    "verify": "node scripts/verify-ipa-roundtrip.mjs"
+    "verify": "node scripts/verify-ipa-roundtrip.mjs",
+    "verify:dedupe": "node scripts/verify-dedupe-cap.mjs"
   },
   "dependencies": {
     "jszip": "^3.10.2",

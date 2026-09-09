@@ -17,19 +17,11 @@ Arabic-first RTL web app: upload an iOS `.ipa` → extract UI strings → transl
 
 ### ماذا يفعل؟
 1. ترفع ملف `.ipa` (حد تقريبي 200 ميجابايت) — **يُحلَّل محلياً في متصفحك**.
-2. يستخرج `.strings` / `.xcstrings`، وأسماء العرض من `Info.plist` (XML)، وملفات نصية صغيرة؛ وإن لم يوجد شيء يحاول عبارات من الثنائي (حد 500).
-3. يترجم عبر محركات متعددة في المتصفح بالترتيب: **translate-pa → MyMemory → LibreTranslate**.
+2. يستخرج `.strings` / `.xcstrings` مع **تصفية افتراضية: الإنجليزية / Base فقط** + إزالة تكرار المفاتيح + **حد ترجمة 1500** (قابل للتعديل).
+3. يترجم عبر محركات متعددة: **translate-pa (دفعات ~48، توازي 3) → MyMemory → LibreTranslate**، مع زر **إلغاء** و ETA.
 4. تنزيل **IPA مترجم** فيه `Payload/*.app/ar.lproj/Localizable.strings`، أو ZIP للنصوص فقط.
 
-**صدق المنتج:** الموقع يترجم نصوص الواجهة ويخرج IPA فيه مجلد ar.lproj — مو سحر يغيّر الصور أو الكود المجمّع كله.
-
-### إثبات فوري على الصفحة
-- صندوق تجريبي + زر «ترجم الآن» (بدون رفع IPA).
-- اختبار ذاتي أخضر OK / أحمر FAIL لـ «Sign In» → عربية.
-
-### الترجمة
-- لا تُعرض الإنجليزية كنجاح صامت — الصفوف الفاشلة تُعلَّم **فشل**.
-- النصوص العربية أصلاً تُتخطى عند الهدف العربية.
+**لماذا كان يظهر ~20 ألف نص؟** تطبيقات مثل Epson iPrint تضم عشرات مجلدات `.lproj`؛ النسخة القديمة كانت تجمع كل اللغات بدون تفضيل Base/en فتنفجر القائمة. الآن الافتراضي يمنع ذلك.
 
 ### التشغيل محلياً
 
@@ -42,8 +34,9 @@ npm run dev
 
 ```bash
 npm run build
-npm run smoke     # Sign In → Arabic via at least one engine
-npm run verify    # fixture IPA → translated IPA with ar.lproj
+npm run smoke          # Sign In → Arabic
+npm run verify         # fixture IPA → translated IPA
+npm run verify:dedupe  # multi-locale ~20k → dedupe/cap
 ```
 
 ---
@@ -55,20 +48,21 @@ npm run verify    # fixture IPA → translated IPA with ar.lproj
 
 ### Pipeline
 1. Upload `.ipa` (~200MB) — parsed in-browser (JSZip).
-2. Extract `.strings` / `.xcstrings`, XML `Info.plist` display/usage strings, small text files; last resort: Latin UI phrases from the main binary (cap **500**).
-3. Translate with **translate-pa → MyMemory → LibreTranslate** until Arabic is returned.
-4. Download **translated IPA** (original entries + injected `ar.lproj/Localizable.strings`) and/or strings ZIP.
+2. Extract `.strings` / `.xcstrings` with defaults: **Base/en locales only**, key dedupe (prefer Base/en), translate-list cap **1500** (UI-configurable). Binary scrape **off** by default (hard cap **200** when enabled; Title-Case / spaced phrases only).
+3. Translate with **translate-pa → MyMemory → LibreTranslate** (batch ~48, concurrency 3), AbortController cancel, ETA / strings-per-sec. Partial failures do not abort the run.
+4. Download **translated IPA** and/or strings ZIP.
 
 ### Limits (documented)
+- Multi-lproj IPAs no longer multiply strings by locale count (default Base/en).
 - Binary plists are not parsed (XML only).
 - Compiled SwiftUI / storyboard layouts are not rewritten.
-- Binary string scrape is capped and heuristic — App Store IPAs without localization files may still yield partial results.
-- **Signing:** the downloaded IPA is unsigned/unmodified for code signature purposes — you must re-sign with your own identity to install on a device.
+- Binary string scrape is opt-in and capped at 200.
+- **Signing:** downloaded IPA still needs your own re-sign to install.
 
 ### Stack
 - Vite + React + TypeScript + Tailwind CSS → GitHub Pages
 - JSZip (client-side IPA read + IPA/ZIP write)
-- Multi-engine MT (no paid key for translate-pa / MyMemory free tier)
+- Multi-engine MT + small Arabic UI glossary (Cancel → إلغاء, …)
 
 ### Deploy
 - **Live:** https://xxxnaif-hub.github.io/ipa-translator/

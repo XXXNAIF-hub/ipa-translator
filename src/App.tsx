@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { parseIpaArrayBuffer } from "@/lib/ipa-parser";
+import {
+  parseIpaArrayBuffer,
+  DEFAULT_MAX_STRINGS,
+  BINARY_STRING_CAP,
+} from "@/lib/ipa-parser";
 import { buildTranslationZip, buildTranslatedIpa } from "@/lib/export-zip";
 import {
   translateStrings,
@@ -31,9 +35,13 @@ const LANGS = [
 type ParseSummary = {
   appName: string | null;
   locales: string[];
+  allLocales: string[];
   stringCount: number;
+  rawStringCount: number;
   files: string[];
   extractionNotes?: string[];
+  truncated?: boolean;
+  truncatedFrom?: number;
 };
 
 type SelfTestState =
@@ -47,8 +55,27 @@ type SelfTestState =
       error?: string;
     };
 
+function formatEta(sec?: number): string {
+  if (sec == null || !Number.isFinite(sec)) return "—";
+  if (sec < 60) return `${sec}ث`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}د ${s}ث`;
+}
+
 export default function App() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const progressRaf = useRef<number | null>(null);
+  const pendingProgress = useRef<{
+    done: number;
+    total: number;
+    rows: TranslationRow[];
+    failCount: number;
+    ratePerSec?: number;
+    etaSec?: number;
+  } | null>(null);
+
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
@@ -60,6 +87,9 @@ export default function App() {
   const [rows, setRows] = useState<TranslationRow[]>([]);
   const [targetLang, setTargetLang] = useState("ar");
   const [progress, setProgress] = useState({ done: 0, total: 0 });
+  const [failLive, setFailLive] = useState(0);
+  const [ratePerSec, setRatePerSec] = useState<number | undefined>();
+  const [etaSec, setEtaSec] = useState<number | undefined>();
   const [search, setSearch] = useState("");
   const [fileName, setFileName] = useState<string | null>(null);
   const [ipaBuffer, setIpaBuffer] = useState<ArrayBuffer | null>(null);
@@ -69,6 +99,15 @@ export default function App() {
   const [demoEngine, setDemoEngine] = useState<string | null>(null);
   const [demoError, setDemoError] = useState<string | null>(null);
   const autoTestRan = useRef(false);
+
+  // Extraction options
+  const [localeMode, setLocaleMode] = useState<"base-en" | "all" | "custom">(
+    "base-en"
+  );
+  const [customLocales, setCustomLocales] = useState<string[]>([]);
+  const [enableBinary, setEnableBinary] = useState(false);
+  const [maxStrings, setMaxStrings] = useState(DEFAULT_MAX_STRINGS);
+  const [availableLocales, setAvailableLocales] = useState<string[]>([]);
 
   const runSelfTest = useCallback(async () => {
     setSelfTest({ status: "running" });
@@ -87,6 +126,15 @@ export default function App() {
     autoTestRan.current = true;
     void runSelfTest();
   }, [runSelfTest]);
+
+  useEffect(() => {
+    return () => {
+      if (progressRaf.current != null) {
+        cancelAnimationFrame(progressRaf.current);
+      }
+      abortRef.current?.abort();
+    };
+  }, []);
 
   const runDemo = async () => {
     const phrase = demoInput.trim() || DEMO_SAMPLE;
@@ -109,64 +157,142 @@ export default function App() {
   };
 
   const reset = () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
     setError(null);
     setStatus(null);
     setSummary(null);
     setStrings([]);
     setRows([]);
     setProgress({ done: 0, total: 0 });
+    setFailLive(0);
+    setRatePerSec(undefined);
+    setEtaSec(undefined);
     setFileName(null);
     setIpaBuffer(null);
+    setAvailableLocales([]);
   };
 
-  const handleFile = useCallback(async (file: File) => {
-    setError(null);
-    setStatus(null);
-    setRows([]);
-    setSummary(null);
-    setStrings([]);
-    setIpaBuffer(null);
+  const buildParseOptions = useCallback(() => {
+    const localeFilter =
+      localeMode === "base-en"
+        ? ("base-en" as const)
+        : localeMode === "all"
+          ? ("all" as const)
+          : customLocales.length > 0
+            ? customLocales
+            : ("base-en" as const);
+    return {
+      localeFilter,
+      enableBinaryExtraction: enableBinary,
+      binaryCap: BINARY_STRING_CAP,
+      maxStrings,
+    };
+  }, [localeMode, customLocales, enableBinary, maxStrings]);
 
-    if (
-      !file.name.toLowerCase().endsWith(".ipa") &&
-      !file.name.toLowerCase().endsWith(".zip")
-    ) {
-      setError("يرجى رفع ملف بامتداد .ipa فقط.");
-      return;
-    }
-    if (file.size > MAX_MB * 1024 * 1024) {
-      setError(
-        `حجم الملف (${(file.size / 1024 / 1024).toFixed(1)} ميجابايت) أكبر من الحد ${MAX_MB} ميجابايت.`
-      );
-      return;
-    }
+  const handleFile = useCallback(
+    async (file: File) => {
+      setError(null);
+      setStatus(null);
+      setRows([]);
+      setSummary(null);
+      setStrings([]);
+      setIpaBuffer(null);
+      setFailLive(0);
+      setRatePerSec(undefined);
+      setEtaSec(undefined);
 
-    setFileName(file.name);
+      if (
+        !file.name.toLowerCase().endsWith(".ipa") &&
+        !file.name.toLowerCase().endsWith(".zip")
+      ) {
+        setError("يرجى رفع ملف بامتداد .ipa فقط.");
+        return;
+      }
+      if (file.size > MAX_MB * 1024 * 1024) {
+        setError(
+          `حجم الملف (${(file.size / 1024 / 1024).toFixed(1)} ميجابايت) أكبر من الحد ${MAX_MB} ميجابايت.`
+        );
+        return;
+      }
+
+      setFileName(file.name);
+      setBusy("parse");
+      setStatus("جاري قراءة الـ IPA في المتصفح...");
+      try {
+        const buffer = await file.arrayBuffer();
+        const retained = buffer.slice(0);
+        setIpaBuffer(retained);
+        const data = await parseIpaArrayBuffer(retained, buildParseOptions());
+        setAvailableLocales(data.allLocales || data.locales || []);
+        setSummary({
+          appName: data.appName,
+          locales: data.locales || [],
+          allLocales: data.allLocales || data.locales || [],
+          stringCount: data.stringCount,
+          rawStringCount: data.rawStringCount,
+          files: data.files || [],
+          extractionNotes: data.extractionNotes,
+          truncated: data.truncated,
+          truncatedFrom: data.truncatedFrom,
+        });
+        setStrings(data.strings || []);
+        if (data.truncated && data.truncatedFrom) {
+          setError(
+            `تم اقتطاع قائمة الترجمة إلى ${data.stringCount} من أصل ${data.truncatedFrom} نصاً بعد إزالة التكرار. ` +
+              `زد «حد الترجمة» إن احتجت المزيد، أو اختر لغات أقل. (~${data.rawStringCount} قبل التصفية)`
+          );
+        } else {
+          setStatus(null);
+        }
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : "فشل تحليل الملف في المتصفح."
+        );
+      } finally {
+        setBusy("idle");
+      }
+    },
+    [buildParseOptions]
+  );
+
+  const reparseWithOptions = async () => {
+    if (!ipaBuffer) return;
     setBusy("parse");
-    setStatus("جاري قراءة الـ IPA في المتصفح...");
+    setError(null);
+    setStatus("إعادة الاستخراج بالخيارات الجديدة...");
+    setRows([]);
     try {
-      const buffer = await file.arrayBuffer();
-      // Keep a copy — JSZip may detach views; slice ensures we retain bytes for IPA rebuild
-      const retained = buffer.slice(0);
-      setIpaBuffer(retained);
-      const data = await parseIpaArrayBuffer(retained);
+      const data = await parseIpaArrayBuffer(ipaBuffer, buildParseOptions());
+      setAvailableLocales(data.allLocales || data.locales || []);
       setSummary({
         appName: data.appName,
         locales: data.locales || [],
+        allLocales: data.allLocales || data.locales || [],
         stringCount: data.stringCount,
+        rawStringCount: data.rawStringCount,
         files: data.files || [],
         extractionNotes: data.extractionNotes,
+        truncated: data.truncated,
+        truncatedFrom: data.truncatedFrom,
       });
       setStrings(data.strings || []);
-      setStatus(null);
+      if (data.truncated && data.truncatedFrom) {
+        setError(
+          `تم اقتطاع قائمة الترجمة إلى ${data.stringCount} من أصل ${data.truncatedFrom} نصاً بعد إزالة التكرار. ` +
+            `زد «حد الترجمة» إن احتجت المزيد.`
+        );
+      } else {
+        setStatus(null);
+      }
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "فشل تحليل الملف في المتصفح."
+        err instanceof Error ? err.message : "فشل إعادة التحليل."
       );
     } finally {
       setBusy("idle");
     }
-  }, []);
+  };
 
   const onDrop = useCallback(
     (e: React.DragEvent) => {
@@ -178,12 +304,44 @@ export default function App() {
     [handleFile]
   );
 
+  const flushProgress = useCallback(() => {
+    progressRaf.current = null;
+    const p = pendingProgress.current;
+    if (!p) return;
+    setProgress({ done: p.done, total: p.total });
+    setRows(p.rows);
+    setFailLive(p.failCount);
+    setRatePerSec(p.ratePerSec);
+    setEtaSec(p.etaSec);
+  }, []);
+
+  const scheduleProgress = useCallback(
+    (update: NonNullable<typeof pendingProgress.current>) => {
+      pendingProgress.current = update;
+      if (progressRaf.current == null) {
+        progressRaf.current = requestAnimationFrame(flushProgress);
+      }
+    },
+    [flushProgress]
+  );
+
+  const cancelTranslate = () => {
+    abortRef.current?.abort();
+    setStatus("جاري الإلغاء...");
+  };
+
   const translateAll = async () => {
     if (strings.length === 0) return;
     setError(null);
     setBusy("translate");
     setRows([]);
     setProgress({ done: 0, total: strings.length });
+    setFailLive(0);
+    setRatePerSec(undefined);
+    setEtaSec(undefined);
+
+    const ac = new AbortController();
+    abortRef.current = ac;
 
     const byId = new Map<string, TranslationRow>();
     try {
@@ -192,37 +350,60 @@ export default function App() {
         strings,
         targetLang,
         sourceLang,
+        signal: ac.signal,
+        concurrency: 3,
         onStatus: (msg) => setStatus(msg),
-        onProgress: (done, total, row) => {
+        onProgress: (done, total, row, meta) => {
           byId.set(row.id, row);
-          setRows(
-            strings
-              .map((s) => byId.get(s.id))
-              .filter(Boolean) as TranslationRow[]
-          );
-          setProgress({ done, total });
+          const nextRows = strings
+            .map((s) => byId.get(s.id))
+            .filter(Boolean) as TranslationRow[];
+          scheduleProgress({
+            done,
+            total,
+            rows: nextRows,
+            failCount: meta?.failCount ?? 0,
+            ratePerSec: meta?.ratePerSec,
+            etaSec: meta?.etaSec,
+          });
         },
       });
       const finalMap = new Map(result.map((r) => [r.id, r]));
       setRows(strings.map((s) => finalMap.get(s.id)!).filter(Boolean));
       setProgress({ done: strings.length, total: strings.length });
       const fails = result.filter((r) => r.failed).length;
-      if (fails > 0) {
+      const cancelled = result.filter(
+        (r) => r.failReason === "أُلغيت"
+      ).length;
+      if (ac.signal.aborted || cancelled > 0) {
+        setStatus(
+          `أُلغيت الترجمة — اكتمل ${result.filter((r) => !r.failed).length}، فشل/أُلغي ${fails}.`
+        );
+      } else if (fails > 0) {
         setError(
-          `اكتملت الترجمة مع فشل ${fails} نصاً (ظلت بالإنجليزية ومُعلَّمة كفشل — ليست نجاحاً صامتاً).`
+          `اكتملت الترجمة مع فشل ${fails} نصاً (ظلت بالإنجليزية ومُعلَّمة كفشل — ليست نجاحاً صامتاً). باقي النصوص تُرجمت.`
         );
         setStatus(`اكتملت مع ${fails} فشل.`);
       } else {
         setStatus(null);
       }
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "فشلت الترجمة. تحقق من الاتصال وأعد المحاولة."
-      );
+      if ((err as Error)?.name === "AbortError") {
+        setStatus("تم إلغاء الترجمة.");
+      } else {
+        setError(
+          err instanceof Error
+            ? err.message
+            : "فشلت الترجمة. تحقق من الاتصال أو أعد المحاولة."
+        );
+      }
     } finally {
+      abortRef.current = null;
       setBusy("idle");
+      if (progressRaf.current != null) {
+        cancelAnimationFrame(progressRaf.current);
+        flushProgress();
+      }
     }
   };
 
@@ -296,7 +477,13 @@ export default function App() {
       ? Math.round((progress.done / progress.total) * 100)
       : 0;
 
-  const failCount = rows.filter((r) => r.failed).length;
+  const failCount = failLive || rows.filter((r) => r.failed).length;
+
+  const toggleCustomLocale = (loc: string) => {
+    setCustomLocales((prev) =>
+      prev.includes(loc) ? prev.filter((x) => x !== loc) : [...prev, loc]
+    );
+  };
 
   return (
     <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 px-4 py-8 sm:px-6">
@@ -316,13 +503,13 @@ export default function App() {
           </p>
           <p className="mt-2 max-w-2xl rounded-lg border border-accent-2/30 bg-accent-2/5 px-3 py-2 text-sm text-accent-2">
             الموقع يترجم نصوص الواجهة ويخرج IPA فيه مجلد ar.lproj — مو سحر يغيّر
-            الصور أو الكود المجمّع كله.
+            الصور أو الكود المجمّع كله. افتراضياً: الإنجليزية/Base فقط · حد{" "}
+            {DEFAULT_MAX_STRINGS} نص · استخراج الثنائي معطّل.
           </p>
         </div>
         <div className="text-sm text-muted">IPA Translator</div>
       </header>
 
-      {/* Instant proof demo — no IPA needed */}
       <section className="card border-accent/40 p-5 sm:p-6">
         <h2 className="mb-1 text-xl font-bold">جرّب الترجمة الآن (بدون IPA)</h2>
         <p className="mb-4 text-sm text-muted">
@@ -368,14 +555,11 @@ export default function App() {
             {busy === "demo" ? "جاري الترجمة…" : "ترجم الآن"}
           </button>
           {demoEngine && !demoError && (
-            <span className="text-sm text-success">
-              عبر {demoEngine}
-            </span>
+            <span className="text-sm text-success">عبر {demoEngine}</span>
           )}
         </div>
       </section>
 
-      {/* Self-test — impossible to miss */}
       <section
         className={`card flex flex-col gap-3 border-2 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5 ${
           selfTest.status === "ok"
@@ -386,7 +570,9 @@ export default function App() {
         }`}
       >
         <div className="text-base font-semibold">
-          <span className="text-muted font-normal">اختبار ذاتي (Sign In → عربية): </span>
+          <span className="text-muted font-normal">
+            اختبار ذاتي (Sign In → عربية):{" "}
+          </span>
           {selfTest.status === "idle" && (
             <span className="text-muted">لم يُشغَّل بعد</span>
           )}
@@ -395,7 +581,8 @@ export default function App() {
           )}
           {selfTest.status === "ok" && (
             <span className="text-success text-lg">
-              ✓ OK — «{selfTest.input}» → «{selfTest.output}» ({selfTest.engine})
+              ✓ OK — «{selfTest.input}» → «{selfTest.output}» ({selfTest.engine}
+              )
             </span>
           )}
           {selfTest.status === "fail" && (
@@ -459,7 +646,104 @@ export default function App() {
           />
         </div>
 
-        {(busy === "parse" || status) && (
+        {/* Extraction options */}
+        <div className="mt-5 grid gap-4 rounded-xl border border-card-border bg-[#0b1222] p-4 sm:grid-cols-2">
+          <div className="flex flex-col gap-2">
+            <div className="text-sm font-semibold">تصفية اللغات (lproj)</div>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name="localeMode"
+                checked={localeMode === "base-en"}
+                onChange={() => setLocaleMode("base-en")}
+                disabled={busy !== "idle"}
+              />
+              الإنجليزية / Base فقط (موصى به)
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name="localeMode"
+                checked={localeMode === "all"}
+                onChange={() => setLocaleMode("all")}
+                disabled={busy !== "idle"}
+              />
+              كل اللغات (قد يصل لآلاف النصوص)
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name="localeMode"
+                checked={localeMode === "custom"}
+                onChange={() => setLocaleMode("custom")}
+                disabled={busy !== "idle"}
+              />
+              تخصيص
+            </label>
+            {localeMode === "custom" && availableLocales.length > 0 && (
+              <div className="mt-1 flex flex-wrap gap-2">
+                {availableLocales.map((loc) => (
+                  <label
+                    key={loc}
+                    className="flex items-center gap-1 rounded-full border border-card-border px-2 py-0.5 text-xs"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={customLocales.includes(loc)}
+                      onChange={() => toggleCustomLocale(loc)}
+                      disabled={busy !== "idle"}
+                    />
+                    {loc}
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="flex flex-col gap-3">
+            <label className="flex flex-col gap-1 text-sm">
+              <span className="font-semibold">
+                حد قائمة الترجمة (افتراضي {DEFAULT_MAX_STRINGS})
+              </span>
+              <input
+                type="number"
+                min={100}
+                max={20000}
+                step={100}
+                value={maxStrings}
+                onChange={(e) =>
+                  setMaxStrings(
+                    Math.max(100, Math.min(20000, Number(e.target.value) || DEFAULT_MAX_STRINGS))
+                  )
+                }
+                disabled={busy !== "idle"}
+                className="w-40"
+                dir="ltr"
+              />
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={enableBinary}
+                onChange={(e) => setEnableBinary(e.target.checked)}
+                disabled={busy !== "idle"}
+              />
+              استخراج من الثنائي إن لم توجد .strings (حد{" "}
+              {BINARY_STRING_CAP} عبارة)
+            </label>
+            {ipaBuffer && (
+              <button
+                type="button"
+                className="btn btn-secondary self-start text-sm"
+                onClick={() => void reparseWithOptions()}
+                disabled={busy !== "idle"}
+              >
+                إعادة الاستخراج بالخيارات
+              </button>
+            )}
+          </div>
+        </div>
+
+        {(busy === "parse" || status) && busy !== "translate" && (
           <p className="mt-4 text-center text-sm text-accent-2">
             {status || "جاري استخراج النصوص..."}
           </p>
@@ -474,12 +758,21 @@ export default function App() {
       {summary && (
         <section className="card grid gap-4 p-5 sm:grid-cols-4 sm:p-6">
           <Stat label="اسم التطبيق" value={summary.appName || "—"} />
-          <Stat label="عدد النصوص" value={String(summary.stringCount)} />
           <Stat
-            label="اللغات الموجودة"
-            value={summary.locales.join(", ") || "—"}
+            label="عدد النصوص (بعد التصفية)"
+            value={String(summary.stringCount)}
+          />
+          <Stat
+            label="قبل التصفية / كل اللغات"
+            value={`${summary.rawStringCount} · ${summary.allLocales.join(", ") || "—"}`}
           />
           <Stat label="ملفات الترجمة" value={String(summary.files.length)} />
+          {summary.truncated && (
+            <div className="sm:col-span-4 rounded-xl border border-accent-2/40 bg-accent-2/10 p-3 text-sm text-accent-2">
+              تم اقتطاع القائمة إلى {summary.stringCount} من أصل{" "}
+              {summary.truncatedFrom} نصاً. زد الحد أو قلّل اللغات إن احتجت.
+            </div>
+          )}
           {summary.extractionNotes && summary.extractionNotes.length > 0 && (
             <div className="sm:col-span-4 rounded-xl border border-card-border bg-[#0b1222] p-3 text-xs text-muted">
               <div className="mb-1 font-semibold text-foreground">
@@ -517,18 +810,28 @@ export default function App() {
                 className="btn btn-secondary"
                 type="button"
                 onClick={reset}
-                disabled={busy !== "idle"}
+                disabled={busy === "translate"}
               >
                 إعادة تعيين
               </button>
-              <button
-                className="btn btn-primary"
-                type="button"
-                onClick={() => void translateAll()}
-                disabled={busy !== "idle"}
-              >
-                {busy === "translate" ? "جاري الترجمة..." : "ترجمة النصوص"}
-              </button>
+              {busy === "translate" ? (
+                <button
+                  className="btn btn-secondary border-danger/50 text-danger"
+                  type="button"
+                  onClick={cancelTranslate}
+                >
+                  إلغاء الترجمة
+                </button>
+              ) : (
+                <button
+                  className="btn btn-primary"
+                  type="button"
+                  onClick={() => void translateAll()}
+                  disabled={busy !== "idle"}
+                >
+                  ترجمة النصوص
+                </button>
+              )}
               <button
                 className="btn btn-primary"
                 type="button"
@@ -563,17 +866,24 @@ export default function App() {
 
           {(busy === "translate" || progress.total > 0) && (
             <div>
-              <div className="mb-2 flex justify-between text-sm text-muted">
+              <div className="mb-2 flex flex-wrap justify-between gap-2 text-sm text-muted">
                 <span>
                   تقدم الترجمة
                   {failCount > 0 && (
-                    <span className="ms-2 text-danger">
-                      ({failCount} فشل)
-                    </span>
+                    <span className="ms-2 text-danger">({failCount} فشل)</span>
+                  )}
+                  {status && busy === "translate" && (
+                    <span className="ms-2 text-accent-2">{status}</span>
                   )}
                 </span>
-                <span>
+                <span className="tabular-nums" dir="ltr">
                   {progress.done} / {progress.total} ({pct}%)
+                  {ratePerSec != null && ratePerSec > 0 && (
+                    <>
+                      {" · "}
+                      {ratePerSec.toFixed(1)}/ث · ETA {formatEta(etaSec)}
+                    </>
+                  )}
                 </span>
               </div>
               <div className="progress-track">
@@ -651,16 +961,17 @@ export default function App() {
         </p>
         <p>
           محركات الترجمة بالترتيب:{" "}
-          <code className="text-foreground">{LOCAL_ENGINE.defaultModel}</code>.
-          الصفوف الفاشلة تُعلَّم كفشل — الإنجليزية لا تُحسب نجاحاً صامتاً.
+          <code className="text-foreground">{LOCAL_ENGINE.defaultModel}</code>{" "}
+          (دفعات ~48 · توازي 3). الصفوف الفاشلة تُعلَّم كفشل — الإنجليزية لا
+          تُحسب نجاحاً صامتاً. قاموس لواجهة Cancel→إلغاء وغيرها.
         </p>
         <p>
-          حدود الاستخراج: ملفات{" "}
-          <code className="text-foreground">.strings</code> /{" "}
-          <code className="text-foreground">.xcstrings</code>، أسماء العرض من{" "}
-          <code className="text-foreground">Info.plist</code> (XML)، ملفات نصية
-          صغيرة، وإن لم يوجد شيء: عبارات لاتينية من الثنائي (حد 500). plists
-          الثنائية وواجهات مجمّعة قد تبقى فارغة جزئياً.
+          حدود الاستخراج: افتراضياً{" "}
+          <strong className="text-foreground">Base/en فقط</strong> + إزالة تكرار
+          المفاتيح + حد ترجمة {DEFAULT_MAX_STRINGS}. استخراج الثنائي{" "}
+          <strong className="text-foreground">معطّل</strong> (حد{" "}
+          {BINARY_STRING_CAP} عند التفعيل). plists الثنائية وواجهات مجمّعة قد
+          تبقى فارغة جزئياً.
         </p>
       </footer>
     </main>

@@ -12,11 +12,37 @@ export type LocalizedString = {
 export type ParseResult = {
   appName: string | null;
   locales: string[];
+  /** Locales discovered before filtering. */
+  allLocales: string[];
   stringCount: number;
+  /** Count before locale filter / key dedupe / cap. */
+  rawStringCount: number;
   strings: LocalizedString[];
   files: string[];
   /** Human-readable notes about extraction path / limits. */
   extractionNotes?: string[];
+  /** True when translate list was truncated to maxStrings. */
+  truncated?: boolean;
+  truncatedFrom?: number;
+};
+
+export type ParseOptions = {
+  /**
+   * Which .lproj locales to keep.
+   * - "base-en" (default): Base + en / en-* only
+   * - "all": every locale
+   * - string[]: explicit locale codes (case-insensitive)
+   */
+  localeFilter?: "base-en" | "all" | string[];
+  /** Enable Mach-O binary scrape when no localization files. Default false. */
+  enableBinaryExtraction?: boolean;
+  /** Hard cap for binary phrases. Default 200. */
+  binaryCap?: number;
+  /**
+   * Cap on returned strings after dedupe (translate list).
+   * Default 1500. Pass 0 / Infinity for no cap.
+   */
+  maxStrings?: number;
 };
 
 export type TranslationRow = {

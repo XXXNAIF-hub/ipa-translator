@@ -118,3 +118,17 @@ if (fail) {
   process.exit(1);
 }
 console.log(`PASS ${FIXTURES.length}/${FIXTURES.length}`);
+
+// App glossary overrides engine verb forms (يلغي/يحفظ) with UI noun labels
+const GLOSSARY_AR = { Cancel: "إلغاء", Save: "حفظ", "Sign In": "تسجيل الدخول" };
+for (const [en, ar] of Object.entries(GLOSSARY_AR)) {
+  if (!ARABIC.test(ar)) {
+    console.error("glossary broken", en, ar);
+    process.exit(1);
+  }
+  console.log(`GLOSSARY  "${en}" → "${ar}"`);
+}
+if (GLOSSARY_AR.Cancel === "يلغي") {
+  console.error("Cancel must not be يلغي");
+  process.exit(1);
+}

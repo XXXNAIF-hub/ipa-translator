@@ -13,7 +13,7 @@ const TRANSLATE_PA_URL = "https://translate-pa.googleapis.com/v1/translateHtml";
 const MYMEMORY_URL = "https://api.mymemory.translated.net/get";
 const LIBRE_URL = "https://libretranslate.com/translate";
 
-export type EngineId = "translate-pa" | "mymemory" | "libretranslate";
+export type EngineId = "translate-pa" | "mymemory" | "libretranslate" | "glossary";
 
 const SUPPORTED_TARGETS = [
   "ar",
@@ -44,6 +44,61 @@ const SUPPORTED_TARGETS = [
   "ja",
   "ko",
 ] as const;
+
+/** Common UI glossary — fixes Cancel→يلغي etc. for Arabic. */
+const UI_GLOSSARY_AR: Record<string, string> = {
+  Cancel: "إلغاء",
+  OK: "حسناً",
+  Done: "تم",
+  Save: "حفظ",
+  Delete: "حذف",
+  Edit: "تعديل",
+  Back: "رجوع",
+  Next: "التالي",
+  Close: "إغلاق",
+  Settings: "الإعدادات",
+  Search: "بحث",
+  Share: "مشاركة",
+  Print: "طباعة",
+  Help: "مساعدة",
+  Home: "الرئيسية",
+  More: "المزيد",
+  Retry: "إعادة المحاولة",
+  Continue: "متابعة",
+  Skip: "تخطي",
+  Yes: "نعم",
+  No: "لا",
+  Error: "خطأ",
+  Warning: "تحذير",
+  "Sign In": "تسجيل الدخول",
+  "Sign Out": "تسجيل الخروج",
+  Login: "تسجيل الدخول",
+  Logout: "تسجيل الخروج",
+  Open: "فتح",
+  Send: "إرسال",
+  Add: "إضافة",
+  Remove: "إزالة",
+  Select: "تحديد",
+  Apply: "تطبيق",
+  Reset: "إعادة تعيين",
+  Clear: "مسح",
+  Copy: "نسخ",
+  Paste: "لصق",
+  Cut: "قص",
+  Undo: "تراجع",
+  Redo: "إعادة",
+  Refresh: "تحديث",
+  Stop: "إيقاف",
+  Start: "بدء",
+  Pause: "إيقاف مؤقت",
+  Play: "تشغيل",
+  Loading: "جاري التحميل",
+  "Please wait": "يرجى الانتظار",
+  Submit: "إرسال",
+  Update: "تحديث",
+  Download: "تنزيل",
+  Upload: "رفع",
+};
 
 export function supportedLocalTargets(): string[] {
   return [
@@ -104,6 +159,18 @@ export function hasArabicScript(text: string): boolean {
   return ARABIC_LETTER_RE.test(text);
 }
 
+function glossaryLookup(text: string, target: string): string | null {
+  const tgt = toEngineCode(target).toLowerCase();
+  if (tgt !== "ar" && !tgt.startsWith("ar")) return null;
+  const trimmed = text.trim();
+  if (UI_GLOSSARY_AR[trimmed]) return UI_GLOSSARY_AR[trimmed];
+  // Case-insensitive exact match
+  const found = Object.entries(UI_GLOSSARY_AR).find(
+    ([k]) => k.toLowerCase() === trimmed.toLowerCase()
+  );
+  return found ? found[1] : null;
+}
+
 function looksTranslated(
   original: string,
   translated: string,
@@ -111,7 +178,6 @@ function looksTranslated(
 ): boolean {
   const t = (translated || "").trim();
   if (!t) return false;
-  // Reject MyMemory quota / warning payloads
   if (/MYMEMORY WARNING/i.test(t)) return false;
   if (/VISIT HTTPS:\/\/MYMEMORY/i.test(t)) return false;
   if (/PLEASE SELECT TWO DISTINCT LANGUAGES/i.test(t)) return false;
@@ -133,12 +199,22 @@ function looksTranslated(
   return true;
 }
 
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    const err = new Error("تم إلغاء الترجمة");
+    err.name = "AbortError";
+    throw err;
+  }
+}
+
 async function translatePaBatch(
   texts: string[],
   source: string,
-  target: string
+  target: string,
+  signal?: AbortSignal
 ): Promise<string[]> {
   if (texts.length === 0) return [];
+  throwIfAborted(signal);
   const res = await fetch(TRANSLATE_PA_URL, {
     method: "POST",
     headers: {
@@ -149,6 +225,7 @@ async function translatePaBatch(
       [texts, toEngineCode(source), toEngineCode(target)],
       "te_lib",
     ]),
+    signal,
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -176,15 +253,17 @@ async function translatePaBatch(
 async function translateMyMemoryOne(
   text: string,
   source: string,
-  target: string
+  target: string,
+  signal?: AbortSignal
 ): Promise<string> {
+  throwIfAborted(signal);
   const url = new URL(MYMEMORY_URL);
   url.searchParams.set("q", text);
   url.searchParams.set(
     "langpair",
     `${toEngineCode(source)}|${toEngineCode(target)}`
   );
-  const res = await fetch(url.toString());
+  const res = await fetch(url.toString(), { signal });
   if (!res.ok) {
     throw new Error(`mymemory HTTP ${res.status}`);
   }
@@ -208,8 +287,10 @@ async function translateMyMemoryOne(
 async function translateLibreOne(
   text: string,
   source: string,
-  target: string
+  target: string,
+  signal?: AbortSignal
 ): Promise<string> {
+  throwIfAborted(signal);
   const res = await fetch(LIBRE_URL, {
     method: "POST",
     headers: {
@@ -222,6 +303,7 @@ async function translateLibreOne(
       target: toEngineCode(target),
       format: "text",
     }),
+    signal,
   });
   const bodyText = await res.text().catch(() => "");
   if (!res.ok) {
@@ -245,32 +327,32 @@ async function translateOnesWithEngine(
   texts: string[],
   source: string,
   target: string,
-  engine: EngineId
+  engine: EngineId,
+  signal?: AbortSignal
 ): Promise<string[]> {
+  if (engine === "glossary") {
+    return texts.map((t) => glossaryLookup(t, target) || t);
+  }
   if (engine === "translate-pa") {
-    return translatePaBatch(texts, source, target);
+    return translatePaBatch(texts, source, target, signal);
   }
   const out: string[] = [];
   for (const t of texts) {
     if (engine === "mymemory") {
-      out.push(await translateMyMemoryOne(t, source, target));
+      out.push(await translateMyMemoryOne(t, source, target, signal));
     } else {
-      out.push(await translateLibreOne(t, source, target));
+      out.push(await translateLibreOne(t, source, target, signal));
     }
   }
   return out;
 }
 
-/**
- * Translate a batch trying engines in order until one returns usable output.
- * For Arabic targets, at least one result in the batch must contain Arabic
- * (or the engine throws / we try next).
- */
 async function translateBatchRaw(
   texts: string[],
   source: string,
   target: string,
-  onStatus?: (msg: string) => void
+  onStatus?: (msg: string) => void,
+  signal?: AbortSignal
 ): Promise<{ texts: string[]; engine: EngineId }> {
   const engines: EngineId[] = [
     "translate-pa",
@@ -283,24 +365,18 @@ async function translateBatchRaw(
     toEngineCode(target).toLowerCase().startsWith("ar");
 
   for (const engine of engines) {
+    throwIfAborted(signal);
     try {
-      onStatus?.(
-        engine === "translate-pa"
-          ? "ترجمة عبر translate-pa..."
-          : engine === "mymemory"
-            ? "ترجمة عبر MyMemory..."
-            : "ترجمة عبر LibreTranslate..."
-      );
       const textsOut = await translateOnesWithEngine(
         texts,
         source,
         target,
-        engine
+        engine,
+        signal
       );
       if (textsOut.length !== texts.length) {
         throw new Error(`${engine}: length mismatch`);
       }
-      // For ar: require at least one Arabic hit if any Latin source present
       if (targetIsAr) {
         const needsAr = texts.some((t) => /[A-Za-z]/.test(t));
         const anyAr = textsOut.some((t) => hasArabicScript(t));
@@ -312,9 +388,10 @@ async function translateBatchRaw(
       }
       return { texts: textsOut, engine };
     } catch (err) {
+      if ((err as Error)?.name === "AbortError") throw err;
       const msg = err instanceof Error ? err.message : String(err);
       errors.push(`${engine}: ${msg}`);
-      onStatus?.(`${engine} تعذّر — تجربة المحرك التالي...`);
+      onStatus?.(`${engine} تعذّر — تجربة التالي...`);
     }
   }
   throw new Error(
@@ -322,30 +399,43 @@ async function translateBatchRaw(
   );
 }
 
-/** Per-string cascade used when a batch item fails looksTranslated. */
 async function translateOneCascade(
   text: string,
   source: string,
   target: string,
-  prefer?: EngineId
+  prefer?: EngineId,
+  signal?: AbortSignal
 ): Promise<{ text: string; engine: EngineId }> {
+  const gloss = glossaryLookup(text, target);
+  if (gloss) return { text: gloss, engine: "glossary" };
+
   const engines: EngineId[] = [
     "translate-pa",
     "mymemory",
     "libretranslate",
   ];
-  if (prefer) {
+  if (prefer && prefer !== "glossary") {
     engines.sort((a, b) => (a === prefer ? -1 : b === prefer ? 1 : 0));
   }
   const errors: string[] = [];
   for (const engine of engines) {
+    throwIfAborted(signal);
     try {
-      const [out] = await translateOnesWithEngine([text], source, target, engine);
+      const [out] = await translateOnesWithEngine(
+        [text],
+        source,
+        target,
+        engine,
+        signal
+      );
       if (looksTranslated(text, out, target)) {
         return { text: out, engine };
       }
-      errors.push(`${engine}: not a valid translation (${JSON.stringify(out).slice(0, 60)})`);
+      errors.push(
+        `${engine}: not a valid translation (${JSON.stringify(out).slice(0, 60)})`
+      );
     } catch (e) {
+      if ((e as Error)?.name === "AbortError") throw e;
       errors.push(
         `${engine}: ${e instanceof Error ? e.message : String(e)}`
       );
@@ -354,11 +444,11 @@ async function translateOneCascade(
   throw new Error(errors.join(" | ").slice(0, 300));
 }
 
-/** Chunk by count and approximate char budget for URL/body safety. */
+/** Larger batches for translate-pa throughput. */
 function chunkInputs(
   items: { index: number; original: string; restore: (t: string) => string }[],
-  maxCount = 32,
-  maxChars = 3500
+  maxCount = 48,
+  maxChars = 4500
 ): (typeof items)[] {
   const chunks: (typeof items)[] = [];
   let cur: typeof items = [];
@@ -380,12 +470,51 @@ function chunkInputs(
   return chunks;
 }
 
+function yieldToUi(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => resolve());
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+}
+
+async function mapPool<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+  signal?: AbortSignal
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  async function worker() {
+    while (true) {
+      throwIfAborted(signal);
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  const n = Math.min(Math.max(1, concurrency), items.length || 1);
+  await Promise.all(Array.from({ length: n }, () => worker()));
+  return results;
+}
+
 export type TranslateOptions = {
   strings: LocalizedString[];
   targetLang: string;
   sourceLang?: string;
-  onProgress?: (done: number, total: number, row: TranslationRow) => void;
+  onProgress?: (
+    done: number,
+    total: number,
+    row: TranslationRow,
+    meta?: { failCount: number; ratePerSec?: number; etaSec?: number }
+  ) => void;
   onStatus?: (msg: string) => void;
+  signal?: AbortSignal;
+  /** Parallel chunk requests (default 3). */
+  concurrency?: number;
 };
 
 export async function translateStrings(
@@ -396,6 +525,8 @@ export async function translateStrings(
   const total = opts.strings.length;
   const rows: TranslationRow[] = new Array(total);
   const targetCode = toEngineCode(target);
+  const signal = opts.signal;
+  const concurrency = opts.concurrency ?? 3;
 
   if (
     !SUPPORTED_TARGETS.map((s) => s.toLowerCase()).includes(
@@ -412,6 +543,7 @@ export async function translateStrings(
 
   if (toEngineCode(source).toLowerCase() === targetCode.toLowerCase()) {
     for (let i = 0; i < opts.strings.length; i++) {
+      throwIfAborted(signal);
       const s = opts.strings[i];
       const row: TranslationRow = {
         id: s.id,
@@ -424,7 +556,8 @@ export async function translateStrings(
         skipReason: s.skipReason || "same-language",
       };
       rows[i] = row;
-      opts.onProgress?.(i + 1, total, row);
+      opts.onProgress?.(i + 1, total, row, { failCount: 0 });
+      if (i % 40 === 0) await yieldToUi();
     }
     return rows;
   }
@@ -436,6 +569,8 @@ export async function translateStrings(
   }[] = [];
 
   let doneCount = 0;
+  let failCount = 0;
+  const startedAt = Date.now();
   const targetIsAr =
     targetCode.toLowerCase() === "ar" ||
     targetCode.toLowerCase().startsWith("ar");
@@ -455,7 +590,7 @@ export async function translateStrings(
       };
       rows[i] = row;
       doneCount++;
-      opts.onProgress?.(doneCount, total, row);
+      opts.onProgress?.(doneCount, total, row, { failCount });
       continue;
     }
     if (targetIsAr && isMostlyArabic(s.value)) {
@@ -471,7 +606,25 @@ export async function translateStrings(
       };
       rows[i] = row;
       doneCount++;
-      opts.onProgress?.(doneCount, total, row);
+      opts.onProgress?.(doneCount, total, row, { failCount });
+      continue;
+    }
+    // Glossary short-circuit
+    const gloss = glossaryLookup(s.value, target);
+    if (gloss) {
+      const row: TranslationRow = {
+        id: s.id,
+        key: s.key,
+        original: s.value,
+        translation: gloss,
+        locale: s.locale,
+        filePath: s.filePath,
+        skipped: false,
+        failed: false,
+      };
+      rows[i] = row;
+      doneCount++;
+      opts.onProgress?.(doneCount, total, row, { failCount });
       continue;
     }
     const { protectedText, restore } = protectPlaceholders(s.value);
@@ -480,16 +633,35 @@ export async function translateStrings(
 
   const chunks = chunkInputs(toTranslate);
   let engineUsed: EngineId | null = null;
-  let failCount = 0;
+  let lastStatusAt = 0;
 
-  for (let c = 0; c < chunks.length; c++) {
-    const chunk = chunks[c];
+  const reportProgress = (row: TranslationRow) => {
+    const elapsed = (Date.now() - startedAt) / 1000;
+    const rate = elapsed > 0.2 ? doneCount / elapsed : undefined;
+    const remaining = total - doneCount;
+    const etaSec =
+      rate && rate > 0 ? Math.round(remaining / rate) : undefined;
+    opts.onProgress?.(doneCount, total, row, {
+      failCount,
+      ratePerSec: rate,
+      etaSec,
+    });
+  };
+
+  const processChunk = async (
+    chunk: (typeof toTranslate)[number][],
+    chunkIndex: number
+  ) => {
+    throwIfAborted(signal);
     const inputs = chunk.map((x) => x.original);
-    opts.onStatus?.(
-      c === 0
-        ? `ترجمة ${toTranslate.length} نصاً (translate-pa → MyMemory → LibreTranslate)...`
-        : `ترجمة دفعة ${c + 1}/${chunks.length} (${doneCount}/${total})...`
-    );
+    const now = Date.now();
+    if (now - lastStatusAt > 800) {
+      lastStatusAt = now;
+      opts.onStatus?.(
+        `ترجمة دفعة ${chunkIndex + 1}/${chunks.length} — ${doneCount}/${total}` +
+          (failCount ? ` (${failCount} فشل)` : "")
+      );
+    }
 
     let translated: string[] | null = null;
     let batchEngine: EngineId | null = null;
@@ -498,13 +670,16 @@ export async function translateStrings(
         inputs,
         source,
         target,
-        opts.onStatus
+        undefined, // less status thrash inside cascade
+        signal
       );
       translated = result.texts;
       batchEngine = result.engine;
       engineUsed = result.engine;
     } catch (err) {
+      if ((err as Error)?.name === "AbortError") throw err;
       const msg = err instanceof Error ? err.message : String(err);
+      // Mark chunk failed but KEEP GOING — don't abort whole run
       for (const item of chunk) {
         const s = opts.strings[item.index];
         const row: TranslationRow = {
@@ -521,12 +696,14 @@ export async function translateStrings(
         rows[item.index] = row;
         doneCount++;
         failCount++;
-        opts.onProgress?.(doneCount, total, row);
+        reportProgress(row);
       }
-      continue;
+      await yieldToUi();
+      return;
     }
 
     for (let j = 0; j < chunk.length; j++) {
+      throwIfAborted(signal);
       const { index, restore, original } = chunk[j];
       const s = opts.strings[index];
       let raw = (translated![j] || "").trim();
@@ -535,27 +712,25 @@ export async function translateStrings(
       let usedEngine = batchEngine!;
 
       if (!ok) {
-        // Per-string cascade through remaining engines
         try {
-          opts.onStatus?.(
-            `إعادة محاولة مفردة: «${original.slice(0, 40)}»...`
-          );
           const retry = await translateOneCascade(
             original,
             source,
             target,
-            batchEngine || undefined
+            batchEngine || undefined,
+            signal
           );
           raw = retry.text.trim();
           restored = restore(raw);
           ok = looksTranslated(original, restored, target);
           usedEngine = retry.engine;
           engineUsed = retry.engine;
-        } catch {
-          // keep ok=false
+        } catch (e) {
+          if ((e as Error)?.name === "AbortError") throw e;
         }
       }
 
+      doneCount++;
       if (!ok) {
         failCount++;
         const row: TranslationRow = {
@@ -572,6 +747,7 @@ export async function translateStrings(
             : "نتيجة فارغة من محرك الترجمة",
         };
         rows[index] = row;
+        reportProgress(row);
       } else {
         const row: TranslationRow = {
           id: s.id,
@@ -585,10 +761,46 @@ export async function translateStrings(
         };
         rows[index] = row;
         void usedEngine;
+        reportProgress(row);
       }
-      doneCount++;
-      opts.onProgress?.(doneCount, total, rows[index]);
+      if (j % 8 === 0) await yieldToUi();
     }
+    await yieldToUi();
+  };
+
+  // Parallel chunk requests with simple concurrency limit
+  try {
+    await mapPool(
+      chunks,
+      concurrency,
+      async (chunk, idx) => {
+        await processChunk(chunk, idx);
+      },
+      signal
+    );
+  } catch (err) {
+    if ((err as Error)?.name === "AbortError") {
+      opts.onStatus?.("تم إلغاء الترجمة.");
+      // Return partial rows — fill missing with cancelled marker
+      for (let i = 0; i < total; i++) {
+        if (!rows[i]) {
+          const s = opts.strings[i];
+          rows[i] = {
+            id: s.id,
+            key: s.key,
+            original: s.value,
+            translation: s.value,
+            locale: s.locale,
+            filePath: s.filePath,
+            skipped: false,
+            failed: true,
+            failReason: "أُلغيت",
+          };
+        }
+      }
+      return rows;
+    }
+    throw err;
   }
 
   if (engineUsed) {
@@ -599,10 +811,24 @@ export async function translateStrings(
     );
   }
 
-  if (failCount === toTranslate.length && toTranslate.length > 0) {
-    throw new Error(
-      `فشلت ترجمة كل النصوص (${failCount}). تحقق من الاتصال أو أعد المحاولة.`
+  // Only throw if NOTHING translated successfully (all failed) — not partial
+  const translatedOk = rows.filter(
+    (r) => r && !r.failed && !r.skipped && r.translation !== r.original
+  ).length;
+  const attempted = toTranslate.length;
+  if (attempted > 0 && failCount === attempted && translatedOk === 0) {
+    // Still return rows — UI should show failures; throw only if zero progress
+    // Actually user said: Don't mark whole run hopeless — keep translating remaining
+    // So we should NOT throw on total failure either if we got partial glossary hits
+    // Only throw if literally every engine died and nothing useful
+    const anySuccess = rows.some(
+      (r) => r && !r.failed && !r.skipped
     );
+    if (!anySuccess) {
+      throw new Error(
+        `فشلت ترجمة كل النصوص (${failCount}). تحقق من الاتصال أو أعد المحاولة.`
+      );
+    }
   }
 
   return rows;
@@ -637,6 +863,10 @@ export async function translateDemoPhrase(
   error?: string;
 }> {
   try {
+    const gloss = glossaryLookup(input, target);
+    if (gloss) {
+      return { ok: true, engine: "glossary", input, output: gloss };
+    }
     const { texts, engine } = await translateBatchRaw([input], source, target);
     const output = texts[0] || "";
     const ok =
@@ -677,5 +907,5 @@ export const LOCAL_ENGINE = {
   name: "multi-engine",
   defaultModel: "translate-pa → MyMemory → LibreTranslate",
   approxDownloadMB: 0,
-  note: "Primary: Google translate-pa. Fallbacks: MyMemory, LibreTranslate public. Failed rows stay marked failed — English never counts as success.",
+  note: "Primary: Google translate-pa (batches ~48, concurrency 3). Fallbacks: MyMemory, LibreTranslate. Glossary for common UI. Failed rows stay marked failed — English never counts as success. Cancel via AbortController.",
 } as const;
