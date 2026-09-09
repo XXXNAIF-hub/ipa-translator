@@ -1,0 +1,149 @@
+@import "tailwindcss";
+
+:root {
+  --background: #070b14;
+  --foreground: #e8eef8;
+  --card: #0f1628;
+  --card-border: #1e2a44;
+  --accent: #3b82f6;
+  --accent-2: #22d3ee;
+  --muted: #94a3b8;
+  --danger: #f87171;
+  --success: #34d399;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-border: var(--card-border);
+  --color-accent: var(--accent);
+  --color-accent-2: var(--accent-2);
+  --color-muted: var(--muted);
+  --color-danger: var(--danger);
+  --color-success: var(--success);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: radial-gradient(1200px 600px at 80% -10%, #132048 0%, transparent 55%),
+    radial-gradient(900px 500px at -10% 20%, #0c2a3a 0%, transparent 50%),
+    var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), "Segoe UI", Tahoma, Arial, sans-serif;
+  min-height: 100vh;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--accent) 40%, transparent);
+}
+
+.card {
+  background: color-mix(in oklab, var(--card) 92%, transparent);
+  border: 1px solid var(--card-border);
+  border-radius: 1rem;
+  backdrop-filter: blur(8px);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 0.75rem;
+  padding: 0.65rem 1.1rem;
+  font-weight: 600;
+  transition: 0.15s ease;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent), #6366f1);
+  color: white;
+}
+
+.btn-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.btn-secondary {
+  background: #151d33;
+  border-color: var(--card-border);
+  color: var(--foreground);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.dropzone {
+  border: 2px dashed #2a3a5c;
+  border-radius: 1rem;
+  transition: 0.15s ease;
+}
+
+.dropzone.active {
+  border-color: var(--accent-2);
+  background: color-mix(in oklab, var(--accent-2) 8%, transparent);
+}
+
+input,
+select,
+textarea {
+  background: #0b1222;
+  border: 1px solid var(--card-border);
+  color: var(--foreground);
+  border-radius: 0.65rem;
+  padding: 0.55rem 0.75rem;
+  outline: none;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 25%, transparent);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  border-bottom: 1px solid var(--card-border);
+  padding: 0.65rem 0.5rem;
+  text-align: right;
+  vertical-align: top;
+}
+
+th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.progress-track {
+  height: 0.55rem;
+  background: #151d33;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-2), var(--accent));
+  transition: width 0.2s ease;
+}
