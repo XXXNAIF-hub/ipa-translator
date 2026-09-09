@@ -1,4 +1,5 @@
 import { protectPlaceholders } from "./placeholders";
+import { shouldSkipTranslation } from "./skip-heuristics";
 import type { LocalizedString, TranslationRow } from "./types";
 
 /**
@@ -732,22 +733,39 @@ export async function translateStrings(
 
       doneCount++;
       if (!ok) {
-        failCount++;
-        const row: TranslationRow = {
-          id: s.id,
-          key: s.key,
-          original: s.value,
-          translation: s.value,
-          locale: s.locale,
-          filePath: s.filePath,
-          skipped: false,
-          failed: true,
-          failReason: raw
-            ? "النتيجة ليست ترجمة صالحة (بقيت إنجليزية أو فارغة)"
-            : "نتيجة فارغة من محرك الترجمة",
-        };
-        rows[index] = row;
-        reportProgress(row);
+        const soft = shouldSkipTranslation(s.value, s.key);
+        if (soft.skip) {
+          const row: TranslationRow = {
+            id: s.id,
+            key: s.key,
+            original: s.value,
+            translation: s.value,
+            locale: s.locale,
+            filePath: s.filePath,
+            skipped: true,
+            skipReason: soft.reason || "soft-skip",
+            failed: false,
+          };
+          rows[index] = row;
+          reportProgress(row);
+        } else {
+          failCount++;
+          const row: TranslationRow = {
+            id: s.id,
+            key: s.key,
+            original: s.value,
+            translation: s.value,
+            locale: s.locale,
+            filePath: s.filePath,
+            skipped: false,
+            failed: true,
+            failReason: raw
+              ? "النتيجة ليست ترجمة صالحة (بقيت إنجليزية أو فارغة)"
+              : "نتيجة فارغة من محرك الترجمة",
+          };
+          rows[index] = row;
+          reportProgress(row);
+        }
       } else {
         const row: TranslationRow = {
           id: s.id,

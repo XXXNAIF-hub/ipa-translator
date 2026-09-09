@@ -65,7 +65,7 @@ export function parseStringsFile(
   while ((m = pairRe.exec(cleaned)) !== null) {
     const key = unescapeStringsValue(m[1]);
     const value = unescapeStringsValue(m[2]);
-    const { skip, reason } = shouldSkipTranslation(value);
+    const { skip, reason } = shouldSkipTranslation(value, key);
     results.push({
       id: `${filePath}::${key}::${idx}`,
       key,
@@ -154,7 +154,7 @@ export function parseXcstringsFile(
       }
     }
     if (value == null) continue;
-    const { skip, reason } = shouldSkipTranslation(value);
+    const { skip, reason } = shouldSkipTranslation(value, key);
     results.push({
       id: `${filePath}::${key}::${idx}`,
       key,

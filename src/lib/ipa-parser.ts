@@ -173,7 +173,7 @@ function extractQuotedUiStrings(
     if (!isLikelyUiPhrase(value)) continue;
     if (seen.has(value)) continue;
     seen.add(value);
-    const { skip, reason } = shouldSkipTranslation(value);
+    const { skip, reason } = shouldSkipTranslation(value, value);
     results.push({
       id: `${filePath}::quoted::${idx}`,
       key: value,
@@ -213,7 +213,7 @@ function extractPlistDisplayStrings(
       /^CFBundle(DisplayName|Name)$/i.test(key);
     if (!interesting) continue;
     if (!value || value.length < 2) continue;
-    const { skip, reason } = shouldSkipTranslation(value);
+    const { skip, reason } = shouldSkipTranslation(value, key);
     results.push({
       id: `${filePath}::plist::${key}::${idx}`,
       key,
@@ -300,7 +300,7 @@ export function extractBinaryUiPhrases(
     if (!isLikelyUiPhrase(s)) continue;
     if (seen.has(s)) continue;
     seen.add(s);
-    const { skip, reason } = shouldSkipTranslation(s);
+    const { skip, reason } = shouldSkipTranslation(s, s);
     results.push({
       id: `${filePath}::bin::${results.length}`,
       key: s,

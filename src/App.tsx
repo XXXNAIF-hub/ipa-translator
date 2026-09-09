@@ -63,6 +63,34 @@ function formatEta(sec?: number): string {
   return `${m}د ${s}ث`;
 }
 
+const SKIP_REASON_AR: Record<string, string> = {
+  empty: "فارغ",
+  "too-short": "قصير",
+  url: "رابط",
+  email: "بريد",
+  "bundle-id": "معرّف",
+  path: "مسار",
+  color: "لون",
+  numeric: "رقم",
+  symbols: "رموز",
+  uuid: "UUID",
+  "format-only": "تنسيق",
+  version: "إصدار",
+  "product-code": "رمز منتج",
+  "proper-noun": "اسم علامة",
+  brand: "اسم تطبيق",
+  "cfbundle-tech": "تقني",
+  "already-arabic": "عربي مسبقاً",
+  "same-language": "نفس اللغة",
+  "soft-skip": "تخطٍ ناعم",
+};
+
+function skipReasonLabel(reason?: string): string {
+  if (!reason) return "—";
+  return SKIP_REASON_AR[reason] || reason;
+}
+
+
 export default function App() {
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -99,6 +127,8 @@ export default function App() {
   const [demoEngine, setDemoEngine] = useState<string | null>(null);
   const [demoError, setDemoError] = useState<string | null>(null);
   const autoTestRan = useRef(false);
+  const previewRef = useRef<HTMLElement>(null);
+  const [highlightPreview, setHighlightPreview] = useState(false);
 
   // Extraction options
   const [localeMode, setLocaleMode] = useState<"base-en" | "all" | "custom">(
@@ -387,6 +417,12 @@ export default function App() {
       } else {
         setStatus(null);
       }
+      // Scroll to preview and briefly highlight first Arabic translations
+      setHighlightPreview(true);
+      window.setTimeout(() => {
+        previewRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 50);
+      window.setTimeout(() => setHighlightPreview(false), 2800);
     } catch (err) {
       if ((err as Error)?.name === "AbortError") {
         setStatus("تم إلغاء الترجمة.");
@@ -478,6 +514,11 @@ export default function App() {
       : 0;
 
   const failCount = failLive || rows.filter((r) => r.failed).length;
+  const translatedCount = rows.filter(
+    (r) => !r.failed && !r.skipped
+  ).length;
+  const skippedCount = rows.filter((r) => r.skipped).length;
+  const failedCount = rows.filter((r) => r.failed).length;
 
   const toggleCustomLocale = (loc: string) => {
     setCustomLocales((prev) =>
@@ -895,7 +936,10 @@ export default function App() {
       )}
 
       {rows.length > 0 && (
-        <section className="card overflow-hidden p-0">
+        <section
+          ref={previewRef}
+          className="card overflow-hidden p-0 scroll-mt-4"
+        >
           <div className="flex flex-col gap-3 border-b border-card-border p-4 sm:flex-row sm:items-center sm:justify-between">
             <h2 className="text-lg font-semibold">معاينة قابلة للتحرير</h2>
             <input
@@ -905,48 +949,130 @@ export default function App() {
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
-          <div className="max-h-[32rem] overflow-auto">
+          <div className="border-b border-card-border px-4 py-2 text-sm">
+            تُرجم{" "}
+            <span className="font-semibold text-success tabular-nums">
+              {translatedCount}
+            </span>
+            {" · "}تخطي{" "}
+            <span className="tabular-nums text-muted">{skippedCount}</span>
+            {" · "}فشل{" "}
+            <span
+              className={`tabular-nums ${
+                failedCount > 0 ? "text-danger" : "text-muted"
+              }`}
+            >
+              {failedCount}
+            </span>
+          </div>
+
+          {/* Mobile: stacked cards — translation first / most prominent */}
+          <div className="max-h-[32rem] space-y-3 overflow-auto p-3 md:hidden">
+            {filtered.map((r, i) => {
+              const flash =
+                highlightPreview &&
+                i < 6 &&
+                !r.skipped &&
+                !r.failed &&
+                r.translation !== r.original;
+              return (
+                <article
+                  key={r.id}
+                  className={`rounded-xl border border-card-border bg-[#0b1222] p-3 ${
+                    flash ? "preview-flash" : ""
+                  } ${r.failed ? "border-danger/40" : ""}`}
+                >
+                  <div className="mb-1 flex flex-wrap items-center gap-2">
+                    <code className="break-all font-mono text-[10px] text-muted">
+                      {r.key}
+                    </code>
+                    {r.skipped && (
+                      <span className="rounded-full bg-accent-2/15 px-2 py-0.5 text-[10px] text-accent-2">
+                        تخطي: {skipReasonLabel(r.skipReason)}
+                      </span>
+                    )}
+                    {r.failed && (
+                      <span className="rounded-full bg-danger/15 px-2 py-0.5 text-[10px] text-danger">
+                        فشل: {r.failReason || "ترجمة غير صالحة"}
+                      </span>
+                    )}
+                  </div>
+                  <label className="mb-1 block text-xs font-semibold text-accent-2">
+                    الترجمة
+                  </label>
+                  <textarea
+                    className={`mb-2 w-full min-h-[2.75rem] resize-y text-base font-medium ${
+                      r.failed ? "border-danger/50" : "border-success/30"
+                    }`}
+                    value={r.translation}
+                    onChange={(e) => updateTranslation(r.id, e.target.value)}
+                    dir="auto"
+                  />
+                  <div className="text-xs text-muted">
+                    <span className="font-semibold">الأصل: </span>
+                    <span className="whitespace-pre-wrap break-words" dir="auto">
+                      {r.original}
+                    </span>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+
+          {/* Desktop: table with الترجمة as first (RTL start) column */}
+          <div className="hidden max-h-[32rem] overflow-auto md:block">
             <table>
               <thead className="sticky top-0 bg-[#0c1426]">
                 <tr>
-                  <th className="w-[22%]">المفتاح</th>
-                  <th className="w-[34%]">الأصل</th>
                   <th className="w-[44%]">الترجمة</th>
+                  <th className="w-[34%]">الأصل</th>
+                  <th className="w-[22%]">المفتاح</th>
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((r) => (
-                  <tr key={r.id}>
-                    <td className="font-mono text-xs text-muted break-all">
-                      {r.key}
-                      {r.skipped && (
-                        <div className="mt-1 text-[10px] text-accent-2">
-                          تخطي: {r.skipReason || "—"}
-                        </div>
-                      )}
-                      {r.failed && (
-                        <div className="mt-1 text-[10px] text-danger">
-                          فشل: {r.failReason || "ترجمة غير صالحة"}
-                        </div>
-                      )}
-                    </td>
-                    <td className="text-sm whitespace-pre-wrap break-words">
-                      {r.original}
-                    </td>
-                    <td>
-                      <textarea
-                        className={`w-full min-h-[2.5rem] resize-y text-sm ${
-                          r.failed ? "border-danger/50" : ""
-                        }`}
-                        value={r.translation}
-                        onChange={(e) =>
-                          updateTranslation(r.id, e.target.value)
-                        }
-                        dir="auto"
-                      />
-                    </td>
-                  </tr>
-                ))}
+                {filtered.map((r, i) => {
+                  const flash =
+                    highlightPreview &&
+                    i < 6 &&
+                    !r.skipped &&
+                    !r.failed &&
+                    r.translation !== r.original;
+                  return (
+                    <tr
+                      key={r.id}
+                      className={flash ? "preview-flash" : undefined}
+                    >
+                      <td>
+                        <textarea
+                          className={`w-full min-h-[2.5rem] resize-y text-sm ${
+                            r.failed ? "border-danger/50" : ""
+                          }`}
+                          value={r.translation}
+                          onChange={(e) =>
+                            updateTranslation(r.id, e.target.value)
+                          }
+                          dir="auto"
+                        />
+                        {r.failed && (
+                          <div className="mt-1 text-[10px] text-danger">
+                            فشل: {r.failReason || "ترجمة غير صالحة"}
+                          </div>
+                        )}
+                        {r.skipped && (
+                          <div className="mt-1 text-[10px] text-accent-2">
+                            تخطي: {skipReasonLabel(r.skipReason)}
+                          </div>
+                        )}
+                      </td>
+                      <td className="text-sm whitespace-pre-wrap break-words text-muted">
+                        {r.original}
+                      </td>
+                      <td className="break-all font-mono text-xs text-muted">
+                        {r.key}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

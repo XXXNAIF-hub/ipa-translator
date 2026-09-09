@@ -155,3 +155,22 @@ th {
   background: linear-gradient(90deg, var(--accent-2), var(--accent));
   transition: width 0.2s ease;
 }
+
+@keyframes preview-flash-kf {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--success) 55%, transparent);
+    background-color: color-mix(in oklab, var(--success) 18%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+    background-color: transparent;
+  }
+}
+
+.preview-flash {
+  animation: preview-flash-kf 2.4s ease-out;
+}
+
+tr.preview-flash td {
+  animation: preview-flash-kf 2.4s ease-out;
+}
