@@ -15,6 +15,8 @@ export type ParseResult = {
   stringCount: number;
   strings: LocalizedString[];
   files: string[];
+  /** Human-readable notes about extraction path / limits. */
+  extractionNotes?: string[];
 };
 
 export type TranslationRow = {

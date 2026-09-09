@@ -2,25 +2,18 @@ import { protectPlaceholders } from "./placeholders";
 import type { LocalizedString, TranslationRow } from "./types";
 
 /**
- * Browser-side translation via Google’s public translate endpoints.
- *
- * Primary: translate-pa.googleapis.com/v1/translateHtml (Chrome te_lib /
- * Translate Element gateway). Supports CORS from GitHub Pages, accepts a
- * batch of strings, no billed API key required — uses the same public key
- * embedded in Google’s website-translation widget.
- *
- * Fallback: legacy translate.googleapis.com/translate_a/single?client=gtx
- * (often CORS/rate-limit blocked in browsers; kept for resilience).
- *
- * Opus-MT / Transformers.js was removed as the sole engine: in practice it
- * returned empty translation_text for UI phrases like "Sign In" / "Settings"
- * and garbage for others, so the UI silently kept English.
+ * Multi-engine browser translation.
+ * Order: translate-pa → MyMemory → LibreTranslate (public).
+ * Never treat unchanged English as success for Arabic targets.
  */
 
 /** Public key used by Google Translate Element / Chrome te_lib (not a secret). */
 const TE_LIB_KEY = "AIzaSyATBXajvzQLTDHEQbcpq0Ihe0vWDHmO520";
 const TRANSLATE_PA_URL = "https://translate-pa.googleapis.com/v1/translateHtml";
-const GTX_URL = "https://translate.googleapis.com/translate_a/single";
+const MYMEMORY_URL = "https://api.mymemory.translated.net/get";
+const LIBRE_URL = "https://libretranslate.com/translate";
+
+export type EngineId = "translate-pa" | "mymemory" | "libretranslate";
 
 const SUPPORTED_TARGETS = [
   "ar",
@@ -88,12 +81,11 @@ function normalizeLang(code: string): string {
   return c;
 }
 
-/** Google expects specific codes (zh-CN, not zh). */
-function toGoogleCode(code: string): string {
+/** Google / engine codes (zh-CN, not zh). */
+function toEngineCode(code: string): string {
   const n = normalizeLang(code);
   if (n === "zh-CN" || n.toLowerCase() === "zh-cn") return "zh-CN";
   if (n === "zh-TW" || n.toLowerCase() === "zh-tw") return "zh-TW";
-  // Prefer bare ISO codes for Google (ar, en, fr, …)
   return n.split("-")[0].toLowerCase();
 }
 
@@ -119,12 +111,17 @@ function looksTranslated(
 ): boolean {
   const t = (translated || "").trim();
   if (!t) return false;
-  const tgt = toGoogleCode(target).toLowerCase();
+  // Reject MyMemory quota / warning payloads
+  if (/MYMEMORY WARNING/i.test(t)) return false;
+  if (/VISIT HTTPS:\/\/MYMEMORY/i.test(t)) return false;
+  if (/PLEASE SELECT TWO DISTINCT LANGUAGES/i.test(t)) return false;
+  if (/^QUOTA EXCEEDED/i.test(t)) return false;
+  if (/get an API key/i.test(t)) return false;
+
+  const tgt = toEngineCode(target).toLowerCase();
   if (tgt === "ar" || tgt.startsWith("ar")) {
-    // Must contain Arabic letters for UI phrases that are Latin-script source
     if (/[A-Za-z]/.test(original) && !hasArabicScript(t)) return false;
   }
-  // Identical copy of a multi-word Latin phrase is suspicious for non-en targets
   if (
     tgt !== "en" &&
     t === original.trim() &&
@@ -149,7 +146,7 @@ async function translatePaBatch(
       "X-Goog-API-Key": TE_LIB_KEY,
     },
     body: JSON.stringify([
-      [texts, toGoogleCode(source), toGoogleCode(target)],
+      [texts, toEngineCode(source), toEngineCode(target)],
       "te_lib",
     ]),
   });
@@ -160,7 +157,6 @@ async function translatePaBatch(
     );
   }
   const data = (await res.json()) as unknown;
-  // Shape: [["t1","t2",...], ...] or just ["t1","t2"] depending on version
   let out: string[] | null = null;
   if (Array.isArray(data)) {
     if (Array.isArray(data[0]) && typeof data[0][0] === "string") {
@@ -177,72 +173,185 @@ async function translatePaBatch(
   return out.map((s) => (typeof s === "string" ? s : String(s ?? "")));
 }
 
-async function translateGtxOne(
+async function translateMyMemoryOne(
   text: string,
   source: string,
   target: string
 ): Promise<string> {
-  const url = new URL(GTX_URL);
-  url.searchParams.set("client", "gtx");
-  url.searchParams.set("sl", toGoogleCode(source));
-  url.searchParams.set("tl", toGoogleCode(target));
-  url.searchParams.set("dt", "t");
+  const url = new URL(MYMEMORY_URL);
   url.searchParams.set("q", text);
+  url.searchParams.set(
+    "langpair",
+    `${toEngineCode(source)}|${toEngineCode(target)}`
+  );
   const res = await fetch(url.toString());
   if (!res.ok) {
-    throw new Error(`gtx HTTP ${res.status}`);
+    throw new Error(`mymemory HTTP ${res.status}`);
   }
-  const data = (await res.json()) as unknown;
-  // [[[translated, original, ...], ...], ...]
-  if (!Array.isArray(data) || !Array.isArray(data[0])) {
-    throw new Error("gtx: unexpected response shape");
+  const data = (await res.json()) as {
+    responseStatus?: number;
+    responseData?: { translatedText?: string };
+    quotaFinished?: boolean;
+  };
+  const out = data?.responseData?.translatedText ?? "";
+  if (!out) {
+    throw new Error(
+      `mymemory: empty (status ${data?.responseStatus ?? "?"})`
+    );
   }
-  const parts = (data[0] as unknown[])
-    .map((seg) => (Array.isArray(seg) ? String(seg[0] ?? "") : ""))
-    .join("");
-  return parts;
+  if (/MYMEMORY WARNING/i.test(out) || data?.quotaFinished) {
+    throw new Error("mymemory: daily quota exceeded");
+  }
+  return out;
 }
 
-async function translateGtxBatch(
-  texts: string[],
+async function translateLibreOne(
+  text: string,
   source: string,
   target: string
+): Promise<string> {
+  const res = await fetch(LIBRE_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({
+      q: text,
+      source: toEngineCode(source),
+      target: toEngineCode(target),
+      format: "text",
+    }),
+  });
+  const bodyText = await res.text().catch(() => "");
+  if (!res.ok) {
+    throw new Error(
+      `libretranslate HTTP ${res.status}: ${bodyText.slice(0, 160)}`
+    );
+  }
+  let data: { translatedText?: string; error?: string };
+  try {
+    data = JSON.parse(bodyText) as { translatedText?: string; error?: string };
+  } catch {
+    throw new Error(`libretranslate: non-JSON ${bodyText.slice(0, 120)}`);
+  }
+  if (data.error) throw new Error(`libretranslate: ${data.error}`);
+  const out = data.translatedText ?? "";
+  if (!out) throw new Error("libretranslate: empty translation");
+  return out;
+}
+
+async function translateOnesWithEngine(
+  texts: string[],
+  source: string,
+  target: string,
+  engine: EngineId
 ): Promise<string[]> {
-  // Legacy gtx: one q per request to avoid URL length + parse ambiguity
+  if (engine === "translate-pa") {
+    return translatePaBatch(texts, source, target);
+  }
   const out: string[] = [];
   for (const t of texts) {
-    out.push(await translateGtxOne(t, source, target));
+    if (engine === "mymemory") {
+      out.push(await translateMyMemoryOne(t, source, target));
+    } else {
+      out.push(await translateLibreOne(t, source, target));
+    }
   }
   return out;
 }
 
 /**
- * Translate a batch with primary translate-pa, fallback to gtx.
- * Throws if both fail.
+ * Translate a batch trying engines in order until one returns usable output.
+ * For Arabic targets, at least one result in the batch must contain Arabic
+ * (or the engine throws / we try next).
  */
 async function translateBatchRaw(
   texts: string[],
   source: string,
   target: string,
   onStatus?: (msg: string) => void
-): Promise<{ texts: string[]; engine: "translate-pa" | "gtx" }> {
-  try {
-    onStatus?.("ترجمة عبر Google Translate (translate-pa)...");
-    const textsOut = await translatePaBatch(texts, source, target);
-    return { texts: textsOut, engine: "translate-pa" };
-  } catch (paErr) {
-    const paMsg = paErr instanceof Error ? paErr.message : String(paErr);
-    onStatus?.(`translate-pa تعذّر (${paMsg.slice(0, 80)}) — تجربة gtx...`);
+): Promise<{ texts: string[]; engine: EngineId }> {
+  const engines: EngineId[] = [
+    "translate-pa",
+    "mymemory",
+    "libretranslate",
+  ];
+  const errors: string[] = [];
+  const targetIsAr =
+    toEngineCode(target).toLowerCase() === "ar" ||
+    toEngineCode(target).toLowerCase().startsWith("ar");
+
+  for (const engine of engines) {
     try {
-      const textsOut = await translateGtxBatch(texts, source, target);
-      return { texts: textsOut, engine: "gtx" };
-    } catch (gtxErr) {
-      const gtxMsg = gtxErr instanceof Error ? gtxErr.message : String(gtxErr);
-      throw new Error(
-        `فشلت الترجمة عبر Google (translate-pa و gtx). pa: ${paMsg} | gtx: ${gtxMsg}`
+      onStatus?.(
+        engine === "translate-pa"
+          ? "ترجمة عبر translate-pa..."
+          : engine === "mymemory"
+            ? "ترجمة عبر MyMemory..."
+            : "ترجمة عبر LibreTranslate..."
+      );
+      const textsOut = await translateOnesWithEngine(
+        texts,
+        source,
+        target,
+        engine
+      );
+      if (textsOut.length !== texts.length) {
+        throw new Error(`${engine}: length mismatch`);
+      }
+      // For ar: require at least one Arabic hit if any Latin source present
+      if (targetIsAr) {
+        const needsAr = texts.some((t) => /[A-Za-z]/.test(t));
+        const anyAr = textsOut.some((t) => hasArabicScript(t));
+        if (needsAr && !anyAr) {
+          throw new Error(
+            `${engine}: no Arabic letters in batch output`
+          );
+        }
+      }
+      return { texts: textsOut, engine };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push(`${engine}: ${msg}`);
+      onStatus?.(`${engine} تعذّر — تجربة المحرك التالي...`);
+    }
+  }
+  throw new Error(
+    `فشلت الترجمة عبر كل المحركات. ${errors.join(" | ").slice(0, 500)}`
+  );
+}
+
+/** Per-string cascade used when a batch item fails looksTranslated. */
+async function translateOneCascade(
+  text: string,
+  source: string,
+  target: string,
+  prefer?: EngineId
+): Promise<{ text: string; engine: EngineId }> {
+  const engines: EngineId[] = [
+    "translate-pa",
+    "mymemory",
+    "libretranslate",
+  ];
+  if (prefer) {
+    engines.sort((a, b) => (a === prefer ? -1 : b === prefer ? 1 : 0));
+  }
+  const errors: string[] = [];
+  for (const engine of engines) {
+    try {
+      const [out] = await translateOnesWithEngine([text], source, target, engine);
+      if (looksTranslated(text, out, target)) {
+        return { text: out, engine };
+      }
+      errors.push(`${engine}: not a valid translation (${JSON.stringify(out).slice(0, 60)})`);
+    } catch (e) {
+      errors.push(
+        `${engine}: ${e instanceof Error ? e.message : String(e)}`
       );
     }
   }
+  throw new Error(errors.join(" | ").slice(0, 300));
 }
 
 /** Chunk by count and approximate char budget for URL/body safety. */
@@ -286,17 +395,22 @@ export async function translateStrings(
   const target = normalizeLang(opts.targetLang);
   const total = opts.strings.length;
   const rows: TranslationRow[] = new Array(total);
-  const targetGoogle = toGoogleCode(target);
+  const targetCode = toEngineCode(target);
 
-  if (!SUPPORTED_TARGETS.map((s) => s.toLowerCase()).includes(targetGoogle.toLowerCase()) &&
-      !SUPPORTED_TARGETS.map((s) => s.toLowerCase()).includes(target.toLowerCase())) {
-    // Still allow — Google covers many langs; only warn via status
+  if (
+    !SUPPORTED_TARGETS.map((s) => s.toLowerCase()).includes(
+      targetCode.toLowerCase()
+    ) &&
+    !SUPPORTED_TARGETS.map((s) => s.toLowerCase()).includes(
+      target.toLowerCase()
+    )
+  ) {
     opts.onStatus?.(
-      `اللغة ${target} غير مُدرجة محلياً لكن سيتم طلبها من Google Translate...`
+      `اللغة ${target} غير مُدرجة محلياً لكن سيتم طلبها من محركات الترجمة...`
     );
   }
 
-  if (toGoogleCode(source).toLowerCase() === targetGoogle.toLowerCase()) {
+  if (toEngineCode(source).toLowerCase() === targetCode.toLowerCase()) {
     for (let i = 0; i < opts.strings.length; i++) {
       const s = opts.strings[i];
       const row: TranslationRow = {
@@ -323,12 +437,11 @@ export async function translateStrings(
 
   let doneCount = 0;
   const targetIsAr =
-    targetGoogle.toLowerCase() === "ar" ||
-    targetGoogle.toLowerCase().startsWith("ar");
+    targetCode.toLowerCase() === "ar" ||
+    targetCode.toLowerCase().startsWith("ar");
 
   for (let i = 0; i < opts.strings.length; i++) {
     const s = opts.strings[i];
-    // Skip heuristics already on string, plus Arabic-script when targeting Arabic
     if (s.skip) {
       const row: TranslationRow = {
         id: s.id,
@@ -366,7 +479,7 @@ export async function translateStrings(
   }
 
   const chunks = chunkInputs(toTranslate);
-  let engineUsed: "translate-pa" | "gtx" | null = null;
+  let engineUsed: EngineId | null = null;
   let failCount = 0;
 
   for (let c = 0; c < chunks.length; c++) {
@@ -374,11 +487,12 @@ export async function translateStrings(
     const inputs = chunk.map((x) => x.original);
     opts.onStatus?.(
       c === 0
-        ? `ترجمة ${toTranslate.length} نصاً عبر Google Translate...`
+        ? `ترجمة ${toTranslate.length} نصاً (translate-pa → MyMemory → LibreTranslate)...`
         : `ترجمة دفعة ${c + 1}/${chunks.length} (${doneCount}/${total})...`
     );
 
-    let translated: string[];
+    let translated: string[] | null = null;
+    let batchEngine: EngineId | null = null;
     try {
       const result = await translateBatchRaw(
         inputs,
@@ -387,9 +501,9 @@ export async function translateStrings(
         opts.onStatus
       );
       translated = result.texts;
+      batchEngine = result.engine;
       engineUsed = result.engine;
     } catch (err) {
-      // Mark entire chunk as failed — do not pretend English is success
       const msg = err instanceof Error ? err.message : String(err);
       for (const item of chunk) {
         const s = opts.strings[item.index];
@@ -415,9 +529,33 @@ export async function translateStrings(
     for (let j = 0; j < chunk.length; j++) {
       const { index, restore, original } = chunk[j];
       const s = opts.strings[index];
-      const raw = (translated[j] || "").trim();
-      const restored = restore(raw);
-      const ok = looksTranslated(original, restored, target);
+      let raw = (translated![j] || "").trim();
+      let restored = restore(raw);
+      let ok = looksTranslated(original, restored, target);
+      let usedEngine = batchEngine!;
+
+      if (!ok) {
+        // Per-string cascade through remaining engines
+        try {
+          opts.onStatus?.(
+            `إعادة محاولة مفردة: «${original.slice(0, 40)}»...`
+          );
+          const retry = await translateOneCascade(
+            original,
+            source,
+            target,
+            batchEngine || undefined
+          );
+          raw = retry.text.trim();
+          restored = restore(raw);
+          ok = looksTranslated(original, restored, target);
+          usedEngine = retry.engine;
+          engineUsed = retry.engine;
+        } catch {
+          // keep ok=false
+        }
+      }
+
       if (!ok) {
         failCount++;
         const row: TranslationRow = {
@@ -446,6 +584,7 @@ export async function translateStrings(
           failed: false,
         };
         rows[index] = row;
+        void usedEngine;
       }
       doneCount++;
       opts.onProgress?.(doneCount, total, rows[index]);
@@ -485,19 +624,24 @@ export async function translateBatch(
   });
 }
 
-/** One-shot self-test used by the UI after load / via button. */
-export async function selfTestTranslation(): Promise<{
+/** One-shot demo / self-test: Sign In → Arabic via first working engine. */
+export async function translateDemoPhrase(
+  input = "Sign In",
+  source = "en",
+  target = "ar"
+): Promise<{
   ok: boolean;
   engine: string;
   input: string;
   output: string;
   error?: string;
 }> {
-  const input = "Sign In";
   try {
-    const { texts, engine } = await translateBatchRaw([input], "en", "ar");
+    const { texts, engine } = await translateBatchRaw([input], source, target);
     const output = texts[0] || "";
-    const ok = hasArabicScript(output) && output !== input;
+    const ok =
+      looksTranslated(input, output, target) &&
+      (toEngineCode(target) !== "ar" || hasArabicScript(output));
     return {
       ok,
       engine,
@@ -505,7 +649,7 @@ export async function selfTestTranslation(): Promise<{
       output,
       error: ok
         ? undefined
-        : `Expected Arabic letters, got: ${JSON.stringify(output)}`,
+        : `Expected a real translation, got: ${JSON.stringify(output)}`,
     };
   } catch (e) {
     return {
@@ -518,9 +662,20 @@ export async function selfTestTranslation(): Promise<{
   }
 }
 
+/** One-shot self-test used by the UI after load / via button. */
+export async function selfTestTranslation(): Promise<{
+  ok: boolean;
+  engine: string;
+  input: string;
+  output: string;
+  error?: string;
+}> {
+  return translateDemoPhrase("Sign In", "en", "ar");
+}
+
 export const LOCAL_ENGINE = {
-  name: "google-translate-pa",
-  defaultModel: "translate-pa.googleapis.com/v1/translateHtml",
+  name: "multi-engine",
+  defaultModel: "translate-pa → MyMemory → LibreTranslate",
   approxDownloadMB: 0,
-  note: "Primary: Google translate-pa (Chrome te_lib). Fallback: client=gtx. Opus-MT removed — returned empty/wrong Arabic.",
+  note: "Primary: Google translate-pa. Fallbacks: MyMemory, LibreTranslate public. Failed rows stay marked failed — English never counts as success.",
 } as const;

@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { parseIpaArrayBuffer } from "@/lib/ipa-parser";
-import { buildTranslationZip } from "@/lib/export-zip";
+import { buildTranslationZip, buildTranslatedIpa } from "@/lib/export-zip";
 import {
   translateStrings,
   selfTestTranslation,
+  translateDemoPhrase,
   LOCAL_ENGINE,
 } from "@/lib/translate";
 import type { LocalizedString, TranslationRow } from "@/lib/types";
 
 const MAX_MB = 200;
+const DEMO_SAMPLE = "Sign In";
 
 const LANGS = [
   { code: "ar", label: "العربية (ar)" },
@@ -31,6 +33,7 @@ type ParseSummary = {
   locales: string[];
   stringCount: number;
   files: string[];
+  extractionNotes?: string[];
 };
 
 type SelfTestState =
@@ -49,9 +52,9 @@ export default function App() {
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
-  const [busy, setBusy] = useState<"idle" | "parse" | "translate" | "export">(
-    "idle"
-  );
+  const [busy, setBusy] = useState<
+    "idle" | "parse" | "translate" | "export" | "demo"
+  >("idle");
   const [summary, setSummary] = useState<ParseSummary | null>(null);
   const [strings, setStrings] = useState<LocalizedString[]>([]);
   const [rows, setRows] = useState<TranslationRow[]>([]);
@@ -59,7 +62,12 @@ export default function App() {
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [search, setSearch] = useState("");
   const [fileName, setFileName] = useState<string | null>(null);
+  const [ipaBuffer, setIpaBuffer] = useState<ArrayBuffer | null>(null);
   const [selfTest, setSelfTest] = useState<SelfTestState>({ status: "idle" });
+  const [demoInput, setDemoInput] = useState(DEMO_SAMPLE);
+  const [demoOutput, setDemoOutput] = useState("");
+  const [demoEngine, setDemoEngine] = useState<string | null>(null);
+  const [demoError, setDemoError] = useState<string | null>(null);
   const autoTestRan = useRef(false);
 
   const runSelfTest = useCallback(async () => {
@@ -80,6 +88,26 @@ export default function App() {
     void runSelfTest();
   }, [runSelfTest]);
 
+  const runDemo = async () => {
+    const phrase = demoInput.trim() || DEMO_SAMPLE;
+    setBusy("demo");
+    setDemoError(null);
+    setDemoOutput("");
+    setDemoEngine(null);
+    try {
+      const result = await translateDemoPhrase(phrase, "en", "ar");
+      setDemoOutput(result.output);
+      setDemoEngine(result.engine);
+      if (!result.ok) {
+        setDemoError(result.error || "فشلت الترجمة");
+      }
+    } catch (err) {
+      setDemoError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy("idle");
+    }
+  };
+
   const reset = () => {
     setError(null);
     setStatus(null);
@@ -88,6 +116,7 @@ export default function App() {
     setRows([]);
     setProgress({ done: 0, total: 0 });
     setFileName(null);
+    setIpaBuffer(null);
   };
 
   const handleFile = useCallback(async (file: File) => {
@@ -96,6 +125,7 @@ export default function App() {
     setRows([]);
     setSummary(null);
     setStrings([]);
+    setIpaBuffer(null);
 
     if (
       !file.name.toLowerCase().endsWith(".ipa") &&
@@ -116,12 +146,16 @@ export default function App() {
     setStatus("جاري قراءة الـ IPA في المتصفح...");
     try {
       const buffer = await file.arrayBuffer();
-      const data = await parseIpaArrayBuffer(buffer);
+      // Keep a copy — JSZip may detach views; slice ensures we retain bytes for IPA rebuild
+      const retained = buffer.slice(0);
+      setIpaBuffer(retained);
+      const data = await parseIpaArrayBuffer(retained);
       setSummary({
         appName: data.appName,
         locales: data.locales || [],
         stringCount: data.stringCount,
         files: data.files || [],
+        extractionNotes: data.extractionNotes,
       });
       setStrings(data.strings || []);
       setStatus(null);
@@ -153,7 +187,6 @@ export default function App() {
 
     const byId = new Map<string, TranslationRow>();
     try {
-      // Default target ar → source en; target en → source ar
       const sourceLang = targetLang === "en" ? "ar" : "en";
       const result = await translateStrings({
         strings,
@@ -214,6 +247,31 @@ export default function App() {
     }
   };
 
+  const downloadIpa = async () => {
+    if (rows.length === 0 || !ipaBuffer) {
+      setError("يلزم رفع IPA وترجمته أولاً قبل تنزيل IPA مترجم.");
+      return;
+    }
+    setBusy("export");
+    setError(null);
+    try {
+      const blob = await buildTranslatedIpa(ipaBuffer, rows, targetLang);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const base = (fileName || "app.ipa").replace(/\.ipa$/i, "");
+      a.download = `${base}-${targetLang}-translated.ipa`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "تعذر بناء ملف IPA المترجم."
+      );
+    } finally {
+      setBusy("idle");
+    }
+  };
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return rows;
@@ -245,42 +303,104 @@ export default function App() {
       <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p className="mb-1 text-sm text-muted">
-            أداة مجانية — التحليل محلياً، الترجمة عبر Google Translate العامة
+            أداة مجانية — التحليل محلياً · الترجمة عبر محركات متعددة في المتصفح
           </p>
           <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">
-            مترجم نصوص IPA
+            ما يترجم — مترجم نصوص IPA
           </h1>
           <p className="mt-2 max-w-2xl text-muted">
             ارفع ملف <span className="text-foreground">.ipa</span> لاستخراج
-            النصوص المحلية وترجمتها (العربية افتراضياً) ثم تنزيل ZIP لملفات
-            الترجمة — دون إعادة توقيع أو تثبيت.
+            نصوص الواجهة وترجمتها ثم تنزيل{" "}
+            <span className="text-foreground">IPA مترجم</span> (فيه{" "}
+            <code className="text-foreground">ar.lproj</code>) أو ZIP للنصوص.
           </p>
-          <p className="mt-2 max-w-2xl text-sm text-accent-2">
-            الترجمة عبر واجهة Google العامة (translate-pa / gtx) — بدون مفتاح
-            مدفوع. الملف يُحلَّل في متصفحك؛ الترجمة تُطلب من Google فقط.
-            النصوص العربية أصلاً تُتخطى عند الهدف العربية.
+          <p className="mt-2 max-w-2xl rounded-lg border border-accent-2/30 bg-accent-2/5 px-3 py-2 text-sm text-accent-2">
+            الموقع يترجم نصوص الواجهة ويخرج IPA فيه مجلد ar.lproj — مو سحر يغيّر
+            الصور أو الكود المجمّع كله.
           </p>
         </div>
         <div className="text-sm text-muted">IPA Translator</div>
       </header>
 
-      <section className="card flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
-        <div className="text-sm">
-          <span className="text-muted">اختبار الترجمة الذاتي: </span>
+      {/* Instant proof demo — no IPA needed */}
+      <section className="card border-accent/40 p-5 sm:p-6">
+        <h2 className="mb-1 text-xl font-bold">جرّب الترجمة الآن (بدون IPA)</h2>
+        <p className="mb-4 text-sm text-muted">
+          إثبات فوري: أدخل إنجليزي واضغط «ترجم الآن» — تظهر العربية من محرك
+          الترجمة الحقيقي (ليس تجميلاً شكلياً).
+        </p>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="flex flex-col gap-2">
+            <label className="text-sm text-muted">English</label>
+            <input
+              className="w-full text-lg"
+              value={demoInput}
+              onChange={(e) => setDemoInput(e.target.value)}
+              placeholder={DEMO_SAMPLE}
+              dir="ltr"
+            />
+          </div>
+          <div className="flex flex-col gap-2">
+            <label className="text-sm text-muted">العربية</label>
+            <div
+              className={`min-h-[2.75rem] rounded-xl border px-3 py-2 text-lg ${
+                demoError
+                  ? "border-danger/50 bg-danger/10 text-danger"
+                  : demoOutput
+                    ? "border-success/40 bg-success/10 text-success"
+                    : "border-card-border bg-[#0b1222] text-muted"
+              }`}
+              dir="rtl"
+            >
+              {demoError
+                ? demoError
+                : demoOutput || "— اضغط ترجم الآن —"}
+            </div>
+          </div>
+        </div>
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            className="btn btn-primary text-base"
+            onClick={() => void runDemo()}
+            disabled={busy === "demo"}
+          >
+            {busy === "demo" ? "جاري الترجمة…" : "ترجم الآن"}
+          </button>
+          {demoEngine && !demoError && (
+            <span className="text-sm text-success">
+              عبر {demoEngine}
+            </span>
+          )}
+        </div>
+      </section>
+
+      {/* Self-test — impossible to miss */}
+      <section
+        className={`card flex flex-col gap-3 border-2 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5 ${
+          selfTest.status === "ok"
+            ? "border-success/60 bg-success/10"
+            : selfTest.status === "fail"
+              ? "border-danger/60 bg-danger/10"
+              : "border-card-border"
+        }`}
+      >
+        <div className="text-base font-semibold">
+          <span className="text-muted font-normal">اختبار ذاتي (Sign In → عربية): </span>
           {selfTest.status === "idle" && (
             <span className="text-muted">لم يُشغَّل بعد</span>
           )}
           {selfTest.status === "running" && (
-            <span className="text-accent-2">جاري اختبار «Sign In» → عربية…</span>
+            <span className="text-accent-2">جاري الاختبار…</span>
           )}
           {selfTest.status === "ok" && (
-            <span className="text-success">
-              OK — «{selfTest.input}» → «{selfTest.output}» ({selfTest.engine})
+            <span className="text-success text-lg">
+              ✓ OK — «{selfTest.input}» → «{selfTest.output}» ({selfTest.engine})
             </span>
           )}
           {selfTest.status === "fail" && (
-            <span className="text-danger">
-              FAIL — {selfTest.error || "لا توجد أحرف عربية في الناتج"}
+            <span className="text-danger text-lg">
+              ✗ FAIL — {selfTest.error || "لا توجد أحرف عربية في الناتج"}
               {selfTest.output ? ` (خرج: «${selfTest.output}»)` : ""}
             </span>
           )}
@@ -291,7 +411,9 @@ export default function App() {
           onClick={() => void runSelfTest()}
           disabled={selfTest.status === "running"}
         >
-          {selfTest.status === "running" ? "جاري الاختبار…" : "إعادة اختبار الترجمة"}
+          {selfTest.status === "running"
+            ? "جاري الاختبار…"
+            : "إعادة اختبار الترجمة"}
         </button>
       </section>
 
@@ -358,6 +480,18 @@ export default function App() {
             value={summary.locales.join(", ") || "—"}
           />
           <Stat label="ملفات الترجمة" value={String(summary.files.length)} />
+          {summary.extractionNotes && summary.extractionNotes.length > 0 && (
+            <div className="sm:col-span-4 rounded-xl border border-card-border bg-[#0b1222] p-3 text-xs text-muted">
+              <div className="mb-1 font-semibold text-foreground">
+                ملاحظات الاستخراج / الحدود
+              </div>
+              <ul className="list-inside list-disc space-y-1">
+                {summary.extractionNotes.map((n, i) => (
+                  <li key={i}>{n}</li>
+                ))}
+              </ul>
+            </div>
+          )}
         </section>
       )}
 
@@ -396,15 +530,36 @@ export default function App() {
                 {busy === "translate" ? "جاري الترجمة..." : "ترجمة النصوص"}
               </button>
               <button
+                className="btn btn-primary"
+                type="button"
+                onClick={() => void downloadIpa()}
+                disabled={busy !== "idle" || rows.length === 0 || !ipaBuffer}
+                title="IPA فيه ar.lproj — يحتاج توقيعك الخاص للتثبيت"
+              >
+                {busy === "export" ? "جاري التصدير..." : "حمّل IPA مترجم"}
+              </button>
+              <button
                 className="btn btn-secondary"
                 type="button"
                 onClick={() => void downloadZip()}
                 disabled={busy !== "idle" || rows.length === 0}
               >
-                {busy === "export" ? "جاري التصدير..." : "تنزيل ZIP"}
+                تنزيل ZIP النصوص
               </button>
             </div>
           </div>
+
+          {rows.length > 0 && (
+            <p className="rounded-lg border border-card-border bg-[#0b1222] px-3 py-2 text-sm text-muted">
+              «حمّل IPA مترجم» ينسخ الحزمة ويحقن{" "}
+              <code className="text-foreground">
+                Payload/*.app/{targetLang}.lproj/Localizable.strings
+              </code>
+              . تثبيت الجهاز ما زال يحتاج{" "}
+              <strong className="text-foreground">توقيعك الخاص</strong> — لا
+              أدوات جيلبريك أو قرصنة هنا.
+            </p>
+          )}
 
           {(busy === "translate" || progress.total > 0) && (
             <div>
@@ -490,20 +645,22 @@ export default function App() {
 
       <footer className="mt-auto space-y-2 pb-6 text-sm text-muted">
         <p>
-          ملاحظة: هذه الأداة مخصّصة للترجمة الشرعية لتطبيقات تملكها أو لديك
-          حقوق تعديلها. لا توفّر تجاوز DRM، ولا أدوات sideloading أو jailbreak،
-          ولا تدّعي أن ملف IPA غير موقّع سيعمل بالتثبيت.
+          الموقع يترجم نصوص الواجهة ويخرج IPA فيه مجلد ar.lproj — مو سحر يغيّر
+          الصور أو الكود المجمّع كله. التثبيت على الجهاز يحتاج توقيع المستخدم —
+          لا تجاوز DRM ولا sideloading/jailbreak.
         </p>
         <p>
-          الناتج الأساسي هو أرشيف ZIP لملفات{" "}
-          <code className="text-foreground">*.lproj/*.strings</code> فقط.
+          محركات الترجمة بالترتيب:{" "}
+          <code className="text-foreground">{LOCAL_ENGINE.defaultModel}</code>.
+          الصفوف الفاشلة تُعلَّم كفشل — الإنجليزية لا تُحسب نجاحاً صامتاً.
         </p>
         <p>
-          محرك الترجمة: Google Translate العامة (
-          <code className="text-foreground">{LOCAL_ENGINE.name}</code>
-          ) مع احتياطي <code className="text-foreground">client=gtx</code>.
-          تحليل الـ IPA يتم في متصفحك؛ طلبات الترجمة تذهب إلى Google فقط. لا
-          يُستخدم Opus-MT بعد أن كان يُرجع نتائج فارغة/خاطئة.
+          حدود الاستخراج: ملفات{" "}
+          <code className="text-foreground">.strings</code> /{" "}
+          <code className="text-foreground">.xcstrings</code>، أسماء العرض من{" "}
+          <code className="text-foreground">Info.plist</code> (XML)، ملفات نصية
+          صغيرة، وإن لم يوجد شيء: عبارات لاتينية من الثنائي (حد 500). plists
+          الثنائية وواجهات مجمّعة قد تبقى فارغة جزئياً.
         </p>
       </footer>
     </main>

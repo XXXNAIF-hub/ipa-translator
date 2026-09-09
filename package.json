@@ -1,13 +1,15 @@
 {
   "name": "ipa-translator",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "smoke": "node scripts/smoke-translate.mjs",
+    "verify": "node scripts/verify-ipa-roundtrip.mjs"
   },
   "dependencies": {
     "jszip": "^3.10.2",
@@ -24,5 +26,5 @@
     "typescript": "^5",
     "vite": "^7.0.0"
   },
-  "description": "Browser IPA localizable strings translator (Google Translate public endpoints)"
+  "description": "Browser IPA UI-strings translator with multi-engine MT and translated IPA export"
 }
