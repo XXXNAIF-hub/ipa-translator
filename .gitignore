@@ -44,3 +44,8 @@ next-env.d.ts
 
 AGENTS.md
 CLAUDE.md
+
+# Transformers.js / Opus-MT model cache (downloaded on first translate)
+.cache/
+models/
+

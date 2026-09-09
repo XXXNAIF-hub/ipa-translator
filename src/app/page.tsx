@@ -17,6 +17,8 @@ const LANGS = [
   { code: "ur", label: "اردو (ur)" },
   { code: "zh-CN", label: "中文 (zh-CN)" },
   { code: "ja", label: "日本語 (ja)" },
+  { code: "it", label: "Italiano (it)" },
+  { code: "ru", label: "Русский (ru)" },
 ];
 
 type ParseSummary = {
@@ -132,7 +134,7 @@ export default function HomePage() {
         setProgress({ done: allRows.length, total: strings.length });
       }
     } catch {
-      setError("تعذر الاتصال أثناء الترجمة. قد تكون واجهة الترجمة المجانية محدودة.");
+      setError("تعذر الاتصال أثناء الترجمة المحلية. تأكد أن الخادم يعمل وأن الموديل جاهز.");
     } finally {
       setBusy("idle");
     }
@@ -205,6 +207,9 @@ export default function HomePage() {
             ارفع ملف <span className="text-foreground">.ipa</span> لاستخراج
             النصوص المحلية وترجمتها (العربية افتراضياً) ثم تنزيل ZIP لملفات
             الترجمة — دون إعادة توقيع أو تثبيت.
+          </p>
+          <p className="mt-2 max-w-2xl text-sm text-accent-2">
+            ترجمة محلية بدون حد يومي — أول تشغيل يحمّل الموديل (~870 ميجابايت، مرة واحدة لكل الموديل متعدد اللغات).
           </p>
         </div>
         <div className="text-sm text-muted">IPA Translator</div>
@@ -398,6 +403,11 @@ export default function HomePage() {
         <p>
           الناتج الأساسي هو أرشيف ZIP لملفات{" "}
           <code className="text-foreground">*.lproj/*.strings</code> فقط.
+        </p>
+        <p>
+          المحرّك الافتراضي: ترجمة عصبية محلية (NLLB-200 عبر Transformers.js) —
+          بدون مفاتيح أو حصص سحابية. أول ترجمة تحمّل الموديل مرة واحدة إلى{" "}
+          <code className="text-foreground">.cache/</code> (~870 ميجابايت).
         </p>
       </footer>
     </main>

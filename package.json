@@ -10,6 +10,7 @@
     "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
+    "@xenova/transformers": "^2.17.2",
     "adm-zip": "^0.6.0",
     "jszip": "^3.10.2",
     "next": "16.3.4",
@@ -27,5 +28,5 @@
     "tailwindcss": "^4",
     "typescript": "^5"
   },
-  "description": "Arabic-first IPA localizable strings translator (free APIs)"
+  "description": "Arabic-first IPA localizable strings translator (offline Opus-MT)"
 }
